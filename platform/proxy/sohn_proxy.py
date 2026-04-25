@@ -264,14 +264,11 @@ async def chat_completions(request: Request):
     skills: dict = request.app.state.skills
     client_passed_tools = bool(body.get("tools"))
 
-    # Skill system activates only when:
-    #   - the proxy has skills loaded, AND
-    #   - the client did not bring its own tools (we don't want to mix our internal
-    #     `load_skill` with caller-defined tools — that would force the caller to
-    #     execute a tool they did not register), AND
-    #   - the request is non-streaming (the streaming code path is left untouched
-    #     for backwards compatibility; tool-loop handling under SSE is harder).
-    use_skills = bool(skills) and not client_passed_tools and not stream
+    # Skill system activates when the proxy has skills loaded AND the caller
+    # did not bring its own tools. Streaming is supported via an SSE tap that
+    # decides between forwarding content deltas verbatim and intercepting a
+    # `load_skill` tool call (see _stream_with_skill_loop).
+    use_skills = bool(skills) and not client_passed_tools
 
     body["messages"] = _inject_system_prompt(
         body.get("messages", []),
@@ -279,6 +276,16 @@ async def chat_completions(request: Request):
     )
 
     client: httpx.AsyncClient = request.app.state.client
+
+    if use_skills:
+        body["tools"] = [LOAD_SKILL_TOOL]
+        body.setdefault("tool_choice", "auto")
+        if stream:
+            return StreamingResponse(
+                _stream_with_skill_loop(client, body, skills),
+                media_type="text/event-stream",
+            )
+        return await _run_with_skill_loop(client, body, skills)
 
     if stream:
         async def event_stream():
@@ -292,16 +299,191 @@ async def chat_completions(request: Request):
                 yield f"data: {{\"error\":{{\"message\":\"{e}\",\"type\":\"upstream_error\"}}}}\n\n".encode()
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-    if use_skills:
-        body["tools"] = [LOAD_SKILL_TOOL]
-        body.setdefault("tool_choice", "auto")
-        return await _run_with_skill_loop(client, body, skills)
-
     try:
         resp = await client.post("/v1/chat/completions", json=body)
     except httpx.HTTPError as e:
         return _error(502, f"Upstream error: {e}", "upstream_error")
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
+
+
+async def _stream_with_skill_loop(
+    client: httpx.AsyncClient, body: dict, skills: dict[str, dict]
+):
+    """SSE generator that taps the upstream stream and intercepts `load_skill`.
+
+    The first deltas reveal whether the model is producing content or calling
+    a tool. We buffer until we know:
+      - first content delta -> flush buffer + forward all subsequent chunks verbatim
+      - tool_calls deltas    -> swallow them, accumulate the call, and once
+                                finish_reason="tool_calls" arrives, run the skill,
+                                append the tool result, and re-issue the stream
+                                from the top. The user-visible stream picks up
+                                from the model's post-skill response.
+
+    Bounded by MAX_SKILL_LOADS rounds; after the limit we fall through and
+    forward whatever the model emits verbatim (no further interception).
+    """
+    body = dict(body)  # avoid mutating the caller's dict across rounds
+
+    for round_idx in range(MAX_SKILL_LOADS + 1):
+        decided: str | None = None  # None | "content" | "tool_call"
+        buffered: list[bytes] = []
+        tool_calls: dict[int, dict] = {}
+        finish_reason: str | None = None
+
+        try:
+            async with client.stream(
+                "POST", "/v1/chat/completions", json=body
+            ) as resp:
+                if resp.status_code != 200:
+                    async for chunk in resp.aiter_bytes():
+                        yield chunk
+                    return
+
+                line_buf = b""
+                async for chunk in resp.aiter_bytes():
+                    line_buf += chunk
+                    while True:
+                        idx = line_buf.find(b"\n")
+                        if idx == -1:
+                            break
+                        raw_line = line_buf[: idx + 1]
+                        line_buf = line_buf[idx + 1 :]
+                        stripped = raw_line.strip()
+                        if not stripped:
+                            # blank line — SSE event terminator. Forward only when streaming content.
+                            if decided == "content":
+                                yield raw_line
+                            else:
+                                buffered.append(raw_line)
+                            continue
+                        if not stripped.startswith(b"data:"):
+                            if decided == "content":
+                                yield raw_line
+                            else:
+                                buffered.append(raw_line)
+                            continue
+                        payload = stripped[5:].strip()
+                        if payload == b"[DONE]":
+                            if decided == "content":
+                                yield raw_line
+                            return
+                        try:
+                            event = json.loads(payload)
+                        except Exception:
+                            if decided == "content":
+                                yield raw_line
+                            else:
+                                buffered.append(raw_line)
+                            continue
+
+                        choice = (event.get("choices") or [{}])[0]
+                        delta = choice.get("delta") or {}
+                        fr = choice.get("finish_reason")
+
+                        if delta.get("content"):
+                            if decided is None:
+                                decided = "content"
+                                for b in buffered:
+                                    yield b
+                                buffered.clear()
+                            yield raw_line
+                        elif delta.get("tool_calls"):
+                            if decided is None:
+                                decided = "tool_call"
+                            for tc_d in delta["tool_calls"]:
+                                tcid = tc_d.get("index", 0)
+                                slot = tool_calls.setdefault(
+                                    tcid,
+                                    {
+                                        "id": tc_d.get("id") or "",
+                                        "type": "function",
+                                        "function": {"name": "", "arguments": ""},
+                                    },
+                                )
+                                if tc_d.get("id"):
+                                    slot["id"] = tc_d["id"]
+                                f_d = tc_d.get("function") or {}
+                                if f_d.get("name"):
+                                    slot["function"]["name"] += f_d["name"]
+                                if f_d.get("arguments"):
+                                    slot["function"]["arguments"] += f_d["arguments"]
+                        else:
+                            if decided is None:
+                                buffered.append(raw_line)
+                            elif decided == "content":
+                                yield raw_line
+
+                        if fr:
+                            finish_reason = fr
+                            if decided == "content":
+                                # forward the finish-marker chunk we just yielded;
+                                # next we expect a [DONE] line which is forwarded above
+                                pass
+                            elif decided == "tool_call" and fr == "tool_calls":
+                                # close the upstream stream, run skill loop
+                                break
+                            else:
+                                # decided is None and finish arrived (empty stream).
+                                # Flush buffer + this finish marker so the client sees a clean end.
+                                for b in buffered:
+                                    yield b
+                                buffered.clear()
+                                yield raw_line
+                    if finish_reason == "tool_calls" and decided == "tool_call":
+                        break
+        except httpx.HTTPError as e:
+            yield (
+                b'data: {"error":{"message":"'
+                + str(e).replace('"', "'").encode()
+                + b'","type":"upstream_error"}}\n\n'
+            )
+            return
+
+        if decided != "tool_call":
+            # Either content was streamed (we already forwarded everything),
+            # or the stream ended without producing anything we recognize.
+            return
+
+        # Skill tool_call mode — execute and re-issue the stream.
+        load_calls = [
+            tc for tc in tool_calls.values()
+            if (tc.get("function") or {}).get("name") == "load_skill"
+        ]
+        if not load_calls:
+            # The model called something that isn't load_skill. We never
+            # advertised any other tool, so this is an unexpected state —
+            # surface the raw assistant response and exit.
+            for b in buffered:
+                yield b
+            return
+
+        body["messages"].append({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": list(tool_calls.values()),
+        })
+        for tc in load_calls:
+            try:
+                args = json.loads((tc.get("function") or {}).get("arguments") or "{}")
+            except Exception:
+                args = {}
+            sname = args.get("name", "")
+            sk = skills.get(sname)
+            content = (
+                sk["body"] if sk
+                else f"ERROR: skill '{sname}' is not in the library."
+            )
+            body["messages"].append({
+                "role": "tool",
+                "tool_call_id": tc.get("id", ""),
+                "name": "load_skill",
+                "content": content,
+            })
+        # Loop: open a fresh upstream stream with the augmented messages.
+
+    # Iteration cap reached.
+    return
 
 
 async def _run_with_skill_loop(
