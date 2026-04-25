@@ -1,0 +1,405 @@
+"""Spark — ACTi's streaming agent loop.
+
+A small, opinionated agent runtime that brokers between an OpenAI-compatible
+inference engine and a streaming client (OWUI, OpenAI SDK, etc). Lives between
+the two:
+
+    client  ←──SSE──  Spark  ──HTTP──→  inference engine
+                       │
+                       └──tool calls──→ caller-supplied handlers
+
+The engine streams tokens (content, reasoning_content, tool_call deltas);
+Spark forwards content/reasoning verbatim, intercepts tool_call deltas,
+dispatches them to caller-supplied handlers, threads the results back into
+the conversation, and loops until the model produces a turn without any
+tool call.
+
+ARCHITECTURE — producer/consumer
+
+    ┌───────────────────────────────────────────────────────────┐
+    │ run_agent_stream() — async generator returned to caller   │
+    │                                                           │
+    │   ┌─ background runner task ────────┐    ┌──────────────┐ │
+    │   │ for turn in range(max_turns):   │    │ asyncio      │ │
+    │   │   stream engine → push chunks ──┼──→ │  Queue       │─┼─→ yield to client
+    │   │   if tool_calls:                │    │              │ │
+    │   │     emit status chunk           │    │              │ │
+    │   │     start progress task ────────┼──→ │  (every 15s) │ │
+    │   │     await handler(args) ────────┼──→ │              │ │
+    │   │     append result, loop         │    │              │ │
+    │   └─────────────────────────────────┘    └──────────────┘ │
+    └───────────────────────────────────────────────────────────┘
+
+The producer/consumer split decouples engine reads from client writes so
+neither blocks the other, and lets us inject synthetic chunks (status,
+progress, keepalive, errors) freely without disturbing the engine stream.
+
+KEY DESIGN CHOICES
+
+  - Tools registered on body["tools"] stay registered across every turn.
+    Never strip them mid-conversation — that's what caused the historical
+    chat-template XML leak (tool_call messages render as raw XML when the
+    schema isn't in the template's tools list).
+
+  - Tool_call deltas are accumulated by `index`, NEVER by `id`. Only the
+    first delta per call carries `id`/`function.name`; subsequent deltas
+    carry only `index` plus partial `function.arguments`. This is the
+    LiteLLM #20711 / OpenAI streaming-spec gotcha that causes silent
+    argument loss in naive implementations.
+
+  - Periodic progress chunks during long tool execution serve as both UX
+    feedback AND SSE keepalive. No separate `: ping` comment lines.
+
+  - max_turns hard-caps the loop (default 4). Per-turn structured logs
+    isolate failures to a specific turn + tool.
+
+PUBLIC API
+
+    async def run_agent_stream(
+        *,
+        client: httpx.AsyncClient,
+        body: dict,
+        tool_handlers: dict[str, ToolHandler],
+        tool_labels: dict[str, ToolLabels] | None = None,
+        served_name: str = "agent",
+        max_turns: int = 4,
+        keepalive_interval_s: float = 15.0,
+        log: Callable[[str], None] = print,
+    ) -> AsyncGenerator[bytes, None]: ...
+
+The caller is responsible for:
+  - registering tool schemas in body["tools"] before invoking
+  - providing async handler(args) -> str for each advertised tool
+  - choosing the engine endpoint via the httpx client base_url
+
+Spark handles:
+  - SSE chunk parsing (OpenAI-compatible wire format)
+  - tool_call delta accumulation by index
+  - tool dispatch + result threading back into messages
+  - status / progress chunks during tool execution
+  - graceful error envelopes
+  - max_turns enforcement
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+import uuid
+from typing import Awaitable, Callable, NamedTuple
+
+import httpx
+
+
+# ---------- types ----------
+
+ToolHandler = Callable[[dict], Awaitable[str]]
+"""Async function that executes a single tool call. Receives the parsed
+arguments dict. Returns the string content for the resulting `tool` message
+the model will see on the next turn. Should not raise; on error, return a
+string starting with 'ERROR:'."""
+
+
+class ToolLabels(NamedTuple):
+    """User-facing copy for status chunks emitted around a tool call.
+
+    `start`     — shown once when the tool starts (e.g. "Generating image")
+    `progress`  — shown every keepalive_interval_s while the tool runs
+                  (e.g. "still generating"). Spark appends "(Ns)" itself.
+    """
+    start: str
+    progress: str
+
+
+# ---------- helpers ----------
+
+def _make_content_chunk(text: str, served_name: str) -> bytes:
+    """Build an OpenAI-shaped SSE chunk that injects assistant content.
+
+    Used for synthetic chunks Spark emits itself (status, progress, error
+    notices) — distinct from passthrough chunks that come straight from
+    the engine.
+    """
+    evt = {
+        "id": "spark-" + uuid.uuid4().hex[:12],
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": served_name,
+        "choices": [{
+            "index": 0,
+            "delta": {"content": text},
+            "finish_reason": None,
+        }],
+    }
+    return b"data: " + json.dumps(evt).encode() + b"\n\n"
+
+
+async def _periodic_progress(
+    queue: asyncio.Queue,
+    served_name: str,
+    label: str,
+    interval_s: float,
+) -> None:
+    """Emit a status chunk every `interval_s` seconds while a tool runs.
+    Doubles as SSE keepalive. Cancelled by the caller when the tool returns.
+    """
+    elapsed = 0
+    try:
+        while True:
+            await asyncio.sleep(interval_s)
+            elapsed += int(interval_s)
+            await queue.put(_make_content_chunk(
+                f"_…{label} ({elapsed}s)…_\n", served_name
+            ))
+    except asyncio.CancelledError:
+        return
+
+
+async def _stream_one_turn(
+    client: httpx.AsyncClient, body: dict, queue: asyncio.Queue
+) -> list[dict]:
+    """Stream one engine turn into `queue`. Return any accumulated tool calls.
+
+    Wire format (OpenAI-compatible, as emitted by SGLang / vLLM):
+        data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}
+        data: {"choices":[{"delta":{"tool_calls":[
+            {"index":0,"id":"...","function":{"name":"...","arguments":""}}
+        ]}}]}
+        data: {"choices":[{"delta":{"tool_calls":[
+            {"index":0,"function":{"arguments":"par"}}
+        ]}}]}
+        ...
+        data: {"choices":[{"finish_reason":"tool_calls"}]}
+        data: [DONE]
+
+    Decision per event:
+      - delta.tool_calls present → accumulate by index, do NOT forward
+      - delta.content / reasoning_content / role → forward verbatim
+      - finish_reason="tool_calls" → stop, return calls
+      - finish_reason=other → forward, return []
+      - [DONE] → engine signals end; runner emits the outer DONE
+    """
+    stream_body = dict(body)
+    stream_body["stream"] = True
+
+    tool_calls: dict[int, dict] = {}
+    finish_reason: str | None = None
+
+    try:
+        async with client.stream(
+            "POST", "/v1/chat/completions", json=stream_body
+        ) as resp:
+            if resp.status_code != 200:
+                content = await resp.aread()
+                await queue.put(b"data: " + content + b"\n\n")
+                return []
+
+            buf = b""
+            async for chunk in resp.aiter_bytes():
+                buf += chunk
+                while b"\n\n" in buf:
+                    raw_event, _, buf = buf.partition(b"\n\n")
+                    line = raw_event.strip()
+                    if not line or not line.startswith(b"data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if payload == b"[DONE]":
+                        if finish_reason is None:
+                            finish_reason = "stop"
+                        continue
+                    try:
+                        evt = json.loads(payload)
+                    except Exception:
+                        await queue.put(b"data: " + payload + b"\n\n")
+                        continue
+
+                    choices = evt.get("choices") or []
+                    if not choices:
+                        await queue.put(b"data: " + payload + b"\n\n")
+                        continue
+                    choice = choices[0]
+                    delta = choice.get("delta") or {}
+                    fr = choice.get("finish_reason")
+                    delta_tools = delta.get("tool_calls")
+
+                    if delta_tools:
+                        for tcd in delta_tools:
+                            idx = tcd.get("index", 0)
+                            slot = tool_calls.setdefault(idx, {
+                                "id": "",
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            })
+                            if tcd.get("id"):
+                                slot["id"] = tcd["id"]
+                            if tcd.get("type"):
+                                slot["type"] = tcd["type"]
+                            fnd = tcd.get("function") or {}
+                            if fnd.get("name"):
+                                slot["function"]["name"] = fnd["name"]
+                            if fnd.get("arguments") is not None:
+                                slot["function"]["arguments"] += fnd["arguments"]
+                    elif (
+                        delta.get("content") is not None
+                        or delta.get("reasoning_content") is not None
+                        or "role" in delta
+                    ):
+                        await queue.put(b"data: " + payload + b"\n\n")
+                    elif fr is not None and fr != "tool_calls":
+                        await queue.put(b"data: " + payload + b"\n\n")
+                    # else: tool_calls finish chunk — drop, runner handles it
+
+                    if fr is not None:
+                        finish_reason = fr
+    except httpx.HTTPError as e:
+        err = json.dumps({"error": {"message": str(e), "type": "upstream_error"}})
+        await queue.put(b"data: " + err.encode() + b"\n\n")
+        return []
+
+    if finish_reason == "tool_calls" and tool_calls:
+        return [tool_calls[i] for i in sorted(tool_calls.keys())]
+    return []
+
+
+# ---------- public API ----------
+
+async def run_agent_stream(
+    *,
+    client: httpx.AsyncClient,
+    body: dict,
+    tool_handlers: dict[str, ToolHandler],
+    tool_labels: dict[str, ToolLabels] | None = None,
+    served_name: str = "agent",
+    max_turns: int = 4,
+    keepalive_interval_s: float = 15.0,
+    log: Callable[[str], None] = print,
+):
+    """Drive a streaming agent loop until the model produces a turn without
+    any tool call (success), or `max_turns` rounds elapse (safety cap).
+
+    Each turn:
+      1. Stream the engine response. Forward content/reasoning chunks to
+         the client live; accumulate any tool_call deltas internally.
+      2. If the turn ended with tool_calls, dispatch each call to its
+         handler, append the assistant tool_call message + the tool
+         result message to body["messages"], and loop.
+      3. If the turn ended without tool_calls, break and return.
+
+    Yields raw SSE bytes ready to write to the client. The final chunk is
+    always `data: [DONE]\\n\\n`. On error, an error envelope chunk is
+    emitted before [DONE].
+
+    Args:
+        client: Pre-configured httpx.AsyncClient pointing at the engine.
+        body: OpenAI-shaped chat completion request. Mutated in place
+              across turns (assistant + tool messages appended).
+        tool_handlers: Map of tool name → async handler(args) -> str.
+        tool_labels: Optional UX strings per tool. Defaults to a generic
+            "Calling {name}" / "still working".
+        served_name: Model name to advertise in synthetic chunks.
+        max_turns: Hard cap on agent iterations. Must be ≥ 1.
+        keepalive_interval_s: Seconds between progress chunks during a
+            tool execution. Doubles as SSE keepalive interval.
+        log: Function called with one structured log line per turn.
+            Defaults to print(); pass a logger.info wrapper if preferred.
+    """
+    if max_turns < 1:
+        raise ValueError("max_turns must be >= 1")
+    tool_labels = tool_labels or {}
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def runner() -> None:
+        try:
+            for turn in range(max_turns):
+                t0 = time.time()
+                tool_calls = await _stream_one_turn(client, body, queue)
+                dt = time.time() - t0
+                if not tool_calls:
+                    log(f"[spark] turn {turn+1}: stream done in {dt:.1f}s, no tool calls")
+                    return
+                names = ",".join(
+                    (tc.get("function") or {}).get("name", "?") for tc in tool_calls
+                )
+                log(f"[spark] turn {turn+1}: stream done in {dt:.1f}s, tool_calls=[{names}]")
+
+                body["messages"].append({
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": tool_calls,
+                })
+
+                for tc in tool_calls:
+                    fn = tc.get("function") or {}
+                    tname = fn.get("name", "")
+                    try:
+                        args = json.loads(fn.get("arguments") or "{}")
+                    except Exception:
+                        args = {}
+                    handler = tool_handlers.get(tname)
+                    if handler is None:
+                        body["messages"].append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "name": tname,
+                            "content": f"ERROR: tool '{tname}' is not registered.",
+                        })
+                        continue
+
+                    labels = tool_labels.get(tname) or ToolLabels(
+                        start=f"Calling {tname}",
+                        progress="still working",
+                    )
+                    await queue.put(_make_content_chunk(
+                        f"\n\n_{labels.start}…_\n\n", served_name
+                    ))
+                    progress_task = asyncio.create_task(_periodic_progress(
+                        queue, served_name, labels.progress, keepalive_interval_s
+                    ))
+                    t_tool = time.time()
+                    try:
+                        content = await handler(args)
+                    except Exception as e:
+                        content = f"ERROR: tool '{tname}' raised: {e}"
+                    finally:
+                        progress_task.cancel()
+                        try:
+                            await progress_task
+                        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                            pass
+                    log(f"[spark] turn {turn+1}: {tname} took "
+                        f"{time.time()-t_tool:.1f}s, result_len={len(content)}")
+
+                    body["messages"].append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "name": tname,
+                        "content": content,
+                    })
+            else:
+                log(f"[spark] hit max_turns={max_turns}, stopping")
+                await queue.put(_make_content_chunk(
+                    "\n\n_Reached the per-turn tool-call limit. Stopping here._\n",
+                    served_name,
+                ))
+        except Exception as e:  # noqa: BLE001
+            log(f"[spark] runner unexpected error: {e}")
+            err = json.dumps({"error": {"message": str(e), "type": "agent_error"}})
+            await queue.put(b"data: " + err.encode() + b"\n\n")
+        finally:
+            await queue.put(b"data: [DONE]\n\n")
+            await queue.put(None)  # sentinel
+
+    task = asyncio.create_task(runner())
+    try:
+        while True:
+            chunk = await queue.get()
+            if chunk is None:
+                return
+            yield chunk
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
