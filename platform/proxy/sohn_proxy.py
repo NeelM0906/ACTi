@@ -347,7 +347,7 @@ async def _stream_with_skill_loop(
     # (~30 tokens) without paying for a full content reply when no skill is needed.
     pre_body["max_tokens"] = 256
 
-    augmented_messages: list | None = None
+    loaded_skill_blocks: list[str] = []  # bodies of skills the model asked to load
 
     for _ in range(MAX_SKILL_LOADS + 1):
         try:
@@ -360,7 +360,6 @@ async def _stream_with_skill_loop(
             )
             return
         if resp.status_code != 200:
-            # Surface upstream error to the client as a single SSE event.
             yield b"data: " + resp.content + b"\n\n"
             yield b"data: [DONE]\n\n"
             return
@@ -373,10 +372,12 @@ async def _stream_with_skill_loop(
             if (tc.get("function") or {}).get("name") == "load_skill"
         ]
         if not load_calls:
-            # No skill needed — exit pre-flight, stage 2 will use the original messages.
-            break
+            break  # no skill needed — exit pre-flight
 
-        # Append the assistant tool-call message and one tool result per call.
+        # Append the assistant tool-call message and one tool result per call,
+        # so the next pre-flight iteration sees the dialog state. Keep the
+        # tool round trips contained to the pre-flight; stage 2 gets a clean
+        # system-prompt augmentation instead (see below).
         pre_body["messages"].append({
             "role": "assistant",
             "content": None,
@@ -389,21 +390,46 @@ async def _stream_with_skill_loop(
                 args = {}
             sname = args.get("name", "")
             sk = skills.get(sname)
-            content = (
-                sk["body"] if sk
-                else f"ERROR: skill '{sname}' is not in the library. Continue without."
-            )
+            if sk:
+                content = sk["body"]
+                loaded_skill_blocks.append(f"### Skill: {sname}\n\n{sk['body']}")
+            else:
+                content = f"ERROR: skill '{sname}' is not in the library. Continue without."
             pre_body["messages"].append({
                 "role": "tool",
                 "tool_call_id": tc.get("id", ""),
                 "name": "load_skill",
                 "content": content,
             })
-        augmented_messages = pre_body["messages"]
 
-    # Stage 2 — streamed final response.
+    # Stage 2 — streamed final response. Inline any loaded skill bodies into
+    # the system prompt rather than carrying the tool_call/tool-result round
+    # trip into the user-visible turn. Reason: with `tools=` removed, the
+    # chat template renders prior tool_calls in messages as raw XML, which
+    # the model then parrots back as content. Inlining sidesteps that
+    # entirely — the skill body is just additional system context.
+    if loaded_skill_blocks:
+        original_msgs = body["messages"]
+        sys_msg = original_msgs[0] if original_msgs and original_msgs[0].get("role") == "system" else None
+        skill_section = (
+            "\n\n## Active Skill Instructions\n\n"
+            "The following skill(s) have been activated for this turn. Apply their "
+            "instructions when producing the user-visible reply.\n\n"
+            + "\n\n---\n\n".join(loaded_skill_blocks)
+        )
+        if sys_msg is not None:
+            new_sys = {
+                **sys_msg,
+                "content": (sys_msg.get("content", "") or "") + skill_section,
+            }
+            stage2_messages = [new_sys] + original_msgs[1:]
+        else:
+            stage2_messages = [{"role": "system", "content": skill_section}] + original_msgs
+    else:
+        stage2_messages = body["messages"]
+
     final_body = dict(body)
-    final_body["messages"] = augmented_messages if augmented_messages else body["messages"]
+    final_body["messages"] = stage2_messages
     final_body["stream"] = True
     final_body["chat_template_kwargs"] = user_ctk  # restore original thinking setting
     if user_max_tokens is not None:
