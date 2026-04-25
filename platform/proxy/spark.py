@@ -283,6 +283,8 @@ async def run_agent_stream(
     max_turns: int = 4,
     keepalive_interval_s: float = 15.0,
     log: Callable[[str], None] = _default_log,
+    on_between_turns: Callable[[list[dict]], Awaitable[list[dict]]] | None = None,
+    on_turn_complete: Callable[[list[dict]], None] | None = None,
 ):
     """Drive a streaming agent loop until the model produces a turn without
     any tool call (success), or `max_turns` rounds elapse (safety cap).
@@ -321,11 +323,21 @@ async def run_agent_stream(
     async def runner() -> None:
         try:
             for turn in range(max_turns):
+                # Between-turn hook (e.g. cortex compaction). Only fires
+                # on turns 2+, since turn 1 hasn't yet appended anything.
+                if turn > 0 and on_between_turns is not None:
+                    body["messages"] = await on_between_turns(body["messages"])
+
                 t0 = time.time()
                 tool_calls = await _stream_one_turn(client, body, queue)
                 dt = time.time() - t0
                 if not tool_calls:
                     log(f"[spark] turn {turn+1}: stream done in {dt:.1f}s, no tool calls")
+                    if on_turn_complete is not None:
+                        try:
+                            on_turn_complete(body["messages"])
+                        except Exception as e:  # noqa: BLE001
+                            log(f"[spark] on_turn_complete hook raised: {e}")
                     return
                 names = ",".join(
                     (tc.get("function") or {}).get("name", "?") for tc in tool_calls

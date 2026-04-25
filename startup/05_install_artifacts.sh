@@ -10,6 +10,8 @@ REPO_ROOT="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/.." &> /dev/null && pwd
 sudo mkdir -p /opt/acti/{proxy,system_prompts,ui,status,inference,skills}
 sudo cp "$REPO_ROOT/platform/proxy/gateway.py"              /opt/acti/proxy/
 sudo cp "$REPO_ROOT/platform/proxy/spark.py"                /opt/acti/proxy/
+sudo cp "$REPO_ROOT/platform/proxy/cortex.py"               /opt/acti/proxy/
+sudo cp "$REPO_ROOT/platform/proxy/cortex_prompts.py"       /opt/acti/proxy/
 sudo cp "$REPO_ROOT/platform/proxy/skills.py"               /opt/acti/proxy/
 sudo cp "$REPO_ROOT/platform/proxy/media.py"                /opt/acti/proxy/
 sudo cp "$REPO_ROOT/platform/proxy/launch_proxy.sh"         /opt/acti/proxy/
@@ -29,7 +31,7 @@ sudo chmod +x /opt/acti/*/launch_*.sh /opt/acti/skills/launch_skill_sync.sh
 
 # State dirs
 sudo mkdir -p /var/lib/acti /var/log/acti /var/lib/acti/openwebui \
-              /var/lib/acti/hf-cache /var/lib/acti/media
+              /var/lib/acti/hf-cache /var/lib/acti/media /var/lib/acti/memory
 [ -f /var/lib/acti/api-keys.txt ] || sudo touch /var/lib/acti/api-keys.txt
 sudo chmod 600 /var/lib/acti/api-keys.txt
 # Media dir must be readable by nginx (which runs as www-data on Ubuntu).

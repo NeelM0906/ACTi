@@ -37,6 +37,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
+import cortex
 import media
 import skills
 from spark import ToolLabels, run_agent_stream, run_agent_sync
@@ -52,6 +53,12 @@ SERVED_NAME = "Sohn"
 API_KEYS_FILE = Path(os.environ.get("ACTI_API_KEY_FILE", "/var/lib/acti/api-keys.txt"))
 MAX_AGENT_TURNS = int(os.environ.get("ACTI_MAX_SKILL_LOADS", "4"))
 AGENT_KEEPALIVE_INTERVAL_S = float(os.environ.get("ACTI_AGENT_KEEPALIVE_INTERVAL_S", "15"))
+
+# ---------- Cortex (memory) configuration ----------
+MEMORY_DIR = Path(os.environ.get("ACTI_MEMORY_DIR", "/var/lib/acti/memory"))
+CONTEXT_WINDOW_TOKENS = int(os.environ.get("ACTI_CONTEXT_WINDOW_TOKENS", "256000"))
+COMPACT_BUFFER_TOKENS = int(os.environ.get("ACTI_COMPACT_BUFFER_TOKENS", "16000"))
+MEMORY_EXTRACTION_ENABLED = os.environ.get("ACTI_MEMORY_EXTRACTION", "1") == "1"
 
 
 def _log(msg: str) -> None:
@@ -108,11 +115,14 @@ async def lifespan(app: FastAPI):
     app.state.skills = skills.load_skills()
     app.state.skills_manifest = skills.skills_manifest_block(app.state.skills)
     app.state.skills_mtime = skills.skills_dir_mtime()
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    n_memories = len(list(MEMORY_DIR.glob("*.md"))) - (1 if (MEMORY_DIR / "MEMORY.md").exists() else 0)
     _log(
         f"[gateway] started. auth={'ON' if app.state.api_keys else 'OFF (dev)'} "
         f"keys_loaded={len(app.state.api_keys)} "
         f"skills_loaded={list(app.state.skills.keys()) or 'none'} "
-        f"media={'ON ('+media.LUMEN_BASE_URL+')' if media.media_enabled() else 'OFF'}"
+        f"media={'ON ('+media.LUMEN_BASE_URL+')' if media.media_enabled() else 'OFF'} "
+        f"memory={MEMORY_DIR} ({n_memories} files, extraction={'ON' if MEMORY_EXTRACTION_ENABLED else 'OFF'})"
     )
     yield
     await app.state.client.aclose()
@@ -205,7 +215,32 @@ async def chat_completions(request: Request):
         skills_manifest=request.app.state.skills_manifest if use_skills else "",
     )
 
+    # Cortex: inject saved memories into the system prompt at request start.
+    body["messages"] = cortex.inject_memories(body["messages"], MEMORY_DIR)
+
     client: httpx.AsyncClient = request.app.state.client
+
+    # Cortex hooks for the agent loop.
+    async def _between_turns(msgs: list[dict]) -> list[dict]:
+        if cortex.should_compact(
+            msgs,
+            max_tokens=CONTEXT_WINDOW_TOKENS,
+            buffer_tokens=COMPACT_BUFFER_TOKENS,
+        ):
+            return await cortex.compact(
+                client=client, messages=msgs, served_name=SERVED_NAME,
+            )
+        return msgs
+
+    def _turn_complete(msgs: list[dict]) -> None:
+        if not MEMORY_EXTRACTION_ENABLED:
+            return
+        # Fire and forget — memory extraction must never block the user.
+        import asyncio as _aio
+        _aio.create_task(cortex.extract_memories(
+            client=client, messages=list(msgs), memory_dir=MEMORY_DIR,
+            served_name=SERVED_NAME,
+        ))
 
     if use_proxy_tools:
         proxy_tools: list[dict] = []
@@ -227,6 +262,8 @@ async def chat_completions(request: Request):
                     served_name=SERVED_NAME,
                     max_turns=MAX_AGENT_TURNS,
                     keepalive_interval_s=AGENT_KEEPALIVE_INTERVAL_S,
+                    on_between_turns=_between_turns,
+                    on_turn_complete=_turn_complete,
                 ),
                 media_type="text/event-stream",
             )
