@@ -434,6 +434,8 @@ async def run_agent_sync(
     tool_handlers: dict[str, ToolHandler],
     max_turns: int = 4,
     log: Callable[[str], None] = _default_log,
+    on_between_turns: Callable[[list[dict]], Awaitable[list[dict]]] | None = None,
+    on_turn_complete: Callable[[list[dict]], None] | None = None,
 ) -> dict:
     """Non-streaming twin of run_agent_stream.
 
@@ -451,6 +453,9 @@ async def run_agent_sync(
     sync_body["stream"] = False
 
     for turn in range(max_turns):
+        if turn > 0 and on_between_turns is not None:
+            sync_body["messages"] = await on_between_turns(sync_body["messages"])
+
         t0 = time.time()
         try:
             resp = await client.post("/v1/chat/completions", json=sync_body)
@@ -471,6 +476,11 @@ async def run_agent_sync(
         log(f"[spark/sync] turn {turn+1}: {time.time()-t0:.1f}s, "
             f"tool_calls=[{','.join((tc.get('function') or {}).get('name','?') for tc in proxy_calls) or '-'}]")
         if not proxy_calls:
+            if on_turn_complete is not None:
+                try:
+                    on_turn_complete(sync_body["messages"])
+                except Exception as e:  # noqa: BLE001
+                    log(f"[spark/sync] on_turn_complete hook raised: {e}")
             return data
 
         sync_body["messages"].append(msg)

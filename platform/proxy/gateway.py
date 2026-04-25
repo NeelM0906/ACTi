@@ -269,6 +269,8 @@ async def chat_completions(request: Request):
             )
         result = await run_agent_sync(
             client=client, body=body, tool_handlers=handlers, max_turns=MAX_AGENT_TURNS,
+            on_between_turns=_between_turns,
+            on_turn_complete=_turn_complete,
         )
         if "error" in result:
             return _error(502, result["error"].get("message", "agent error"), "upstream_error")
