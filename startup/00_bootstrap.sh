@@ -17,6 +17,9 @@ cd "$( dirname -- "${BASH_SOURCE[0]}" )"
 bash 01_install_system.sh
 bash 02_install_rocm.sh
 bash 03_install_python_env.sh
+# 03b builds the SGLang engine env (the default); set ACTI_SKIP_SGLANG=1 to skip
+# if the operator only wants the vLLM fallback engine.
+[ "${ACTI_SKIP_SGLANG:-0}" = "1" ] || bash 03b_install_sglang.sh
 bash 04_patch_openwebui.sh
 bash 05_install_artifacts.sh
 bash 06_download_model.sh

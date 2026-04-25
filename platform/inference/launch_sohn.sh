@@ -20,7 +20,7 @@ ACTI_LOG_DIR="${ACTI_LOG_DIR:-/var/log/acti}"
 ACTI_MAX_MODEL_LEN="${ACTI_MAX_MODEL_LEN:-262144}"
 ACTI_GPU_MEM_UTIL="${ACTI_GPU_MEM_UTIL:-0.9}"
 ACTI_TENSOR_PARALLEL_SIZE="${ACTI_TENSOR_PARALLEL_SIZE:-1}"
-ACTI_ATTENTION_BACKEND="${ACTI_ATTENTION_BACKEND:-TRITON_ATTN}"
+ACTI_VLLM_ATTENTION_BACKEND="${ACTI_VLLM_ATTENTION_BACKEND:-TRITON_ATTN}"
 ACTI_INFERENCE_PORT="${ACTI_INFERENCE_PORT:-8000}"
 
 # --- Throughput tuning ---
@@ -76,7 +76,7 @@ exec vllm serve "$ACTI_MODEL_ID" \
   --enable-auto-tool-choice \
   --tool-call-parser "$ACTI_TOOL_CALL_PARSER" \
   --enable-prefix-caching \
-  --attention-backend "$ACTI_ATTENTION_BACKEND" \
+  --attention-backend "$ACTI_VLLM_ATTENTION_BACKEND" \
   "${EXTRA_ARGS[@]}" \
   --trust-remote-code \
   --host 0.0.0.0 \

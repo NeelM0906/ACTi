@@ -29,8 +29,16 @@ if ! [ -s /var/lib/acti/api-keys.txt ]; then
   echo "  provisioned new API key (SAVE THIS): $KEY"
 fi
 
-# Inference engine first (longest cold-start)
-start_service acti-inference "/opt/acti/inference/launch_sohn.sh"
+# Inference engine first (longest cold-start).
+# ACTI_INFERENCE_ENGINE selects the launcher; defaults to sglang.
+#   sglang  → /opt/acti/inference/launch_sglang.sh (MoE base models, default)
+#   vllm    → /opt/acti/inference/launch_sohn.sh   (dense base models, fallback)
+case "${ACTI_INFERENCE_ENGINE:-sglang}" in
+  sglang) ENGINE_LAUNCHER="/opt/acti/inference/launch_sglang.sh" ;;
+  vllm)   ENGINE_LAUNCHER="/opt/acti/inference/launch_sohn.sh" ;;
+  *)      echo "  unknown ACTI_INFERENCE_ENGINE='${ACTI_INFERENCE_ENGINE}' (expected sglang|vllm)"; exit 1 ;;
+esac
+start_service acti-inference "$ENGINE_LAUNCHER"
 
 # Wait for inference to bind :8000 before starting downstream services
 echo -n "  waiting for inference :${ACTI_INFERENCE_PORT:-8000} "

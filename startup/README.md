@@ -40,22 +40,25 @@ The orchestrator (`00_bootstrap.sh`) calls each step in order. They can also be 
 |---|---|
 | `01_install_system.sh` | apt deps: nginx, tmux, OpenMPI runtime, build tools |
 | `02_install_rocm.sh` | ROCm 7.2.1 userspace + dev headers; cleans up older `/opt/rocm-*` from `ldconfig` |
-| `03_install_python_env.sh` | Creates conda env, installs ROCm-built torch, the inference engine, all runtime deps |
+| `03_install_python_env.sh` | Creates the `acti-inference` conda env, installs ROCm-built torch + the vLLM fallback engine + runtime deps |
+| `03b_install_sglang.sh` | Clones the env to `acti-sglang` and builds SGLang from source against ROCm. SGLang is the default engine — set `ACTI_SKIP_SGLANG=1` if you only need the vLLM fallback |
 | `04_patch_openwebui.sh` | One-line patch to OpenWebUI's `env.py` to remove the hardcoded `(Open WebUI)` suffix from app strings |
 | `05_install_artifacts.sh` | Copies the platform code/config to `/opt/acti/`, sets up `/var/lib/acti/` and `/var/log/acti/`, installs the nginx config |
 | `06_download_model.sh` | Downloads model weights into `/var/lib/acti/hf-cache` using your `HF_TOKEN` |
-| `07_start_all.sh` | Starts inference engine, Sohn API proxy, OpenWebUI, and the status collector — each in its own tmux session |
+| `07_start_all.sh` | Starts the inference engine (selected by `ACTI_INFERENCE_ENGINE`, default `sglang`), Sohn API proxy, OpenWebUI, and the status collector — each in its own tmux session |
 
 ## Required environment variables
 
-These three must be set in `startup/.env` before `00_bootstrap.sh` will run:
+These four must be set in `startup/.env` before `00_bootstrap.sh` will run:
 
 | Variable | Description |
 |---|---|
 | `ACTI_MODEL_ID` | HuggingFace repo id of the underlying base model. **Operator-confidential** — request from the platform team. |
-| `ACTI_TOOL_CALL_PARSER` | vLLM tool-call parser name appropriate for your base model |
-| `ACTI_REASONING_PARSER` | vLLM reasoning parser name (separates chain-of-thought) |
+| `ACTI_TOOL_CALL_PARSER` | Tool-call parser name appropriate for your base model. The same name format is used by both engines (e.g. `the tool-call parser`). |
+| `ACTI_REASONING_PARSER` | Reasoning parser name that separates chain-of-thought (e.g. `the reasoning parser`). |
 | `HF_TOKEN` | HuggingFace access token for weight download |
+
+`ACTI_INFERENCE_ENGINE` (default `sglang`) selects which engine `07_start_all.sh` launches. Use `vllm` to run the dense-model fallback instead.
 
 All other knobs (paths, ports, GPU memory, context length, attention backend) are documented with sensible defaults in `env.example`.
 
@@ -112,6 +115,18 @@ For example, to reload Sohn's system prompt after editing `platform/system_promp
 sudo cp platform/system_prompts/sohn.txt /opt/acti/system_prompts/sohn.txt
 tmux kill-session -t acti-proxy
 bash /opt/acti/proxy/launch_proxy.sh &
+```
+
+## Switching engines
+
+The default inference engine is **SGLang** (`acti-sglang` conda env, `launch_sglang.sh`), tuned for MoE base models and shared-prefix prompt caching via RadixAttention. The **vLLM** engine (`acti-inference` conda env, `launch_sohn.sh`) remains as a fallback for dense base models or operators who want the MTP speculative-decoding path.
+
+Both engines are launched the same way; only the env vars change. To swap at runtime:
+
+```bash
+# point .env at the engine you want, then:
+tmux kill-session -t acti-inference
+ACTI_INFERENCE_ENGINE=vllm bash startup/07_start_all.sh
 ```
 
 ## Troubleshooting

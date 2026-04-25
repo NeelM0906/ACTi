@@ -14,6 +14,7 @@ sudo cp "$REPO_ROOT/platform/system_prompts/sohn.txt"       /opt/acti/system_pro
 sudo cp "$REPO_ROOT/platform/ui/launch_owui.sh"             /opt/acti/ui/
 sudo cp "$REPO_ROOT/platform/ui/owui-branding.css"          /opt/acti/ui/
 sudo cp "$REPO_ROOT/platform/inference/launch_sohn.sh"      /opt/acti/inference/
+sudo cp "$REPO_ROOT/platform/inference/launch_sglang.sh"    /opt/acti/inference/
 sudo cp "$REPO_ROOT/platform/status/status_collector.py"    /opt/acti/status/
 sudo cp "$REPO_ROOT/platform/status/launch_status.sh"       /opt/acti/status/
 sudo chmod +x /opt/acti/*/launch_*.sh
