@@ -28,6 +28,24 @@ export DEFAULT_MODELS="Sohn"
 export DATA_DIR="${ACTI_OWUI_DATA_DIR:-/var/lib/acti/openwebui}"
 mkdir -p "$DATA_DIR"
 
+# --- Image generation (toggle in the chat + button) ---
+# Routes through the gateway's /v1/images/generations, which calls Lumen
+# server-side. ACTi-managed; no DALL-E or external service involved.
+export ENABLE_IMAGE_GENERATION=true
+export IMAGE_GENERATION_ENGINE=openai
+export IMAGES_OPENAI_API_BASE_URL="http://127.0.0.1:8080/v1"
+export IMAGES_OPENAI_API_KEY="$OPENAI_API_KEY"
+# Default size and model — Lumen accepts size as WxH and ignores model name.
+export IMAGE_SIZE="1024x1024"
+export IMAGE_GENERATION_MODEL="lumen"
+
+# --- Video generation (toggle in the chat + button) ---
+# ACTi-only: no native OWUI feature. Custom handler in the fork's
+# middleware calls our gateway's /v1/videos/generations endpoint.
+export ENABLE_VIDEO_GENERATION=true
+export VIDEO_GENERATION_API_BASE_URL="http://127.0.0.1:8080/v1"
+export VIDEO_GENERATION_API_KEY="$OPENAI_API_KEY"
+
 # --- Web search (DuckDuckGo — no API key needed) ---
 export ENABLE_RAG_WEB_SEARCH=true
 export RAG_WEB_SEARCH_ENGINE="duckduckgo"

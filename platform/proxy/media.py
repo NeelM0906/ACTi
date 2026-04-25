@@ -303,7 +303,7 @@ async def handle_generate_video(args: dict) -> str:
     return _format_video_result(await _generate_video(args))
 
 
-# ---------- direct API surface (for /v1/images/generations) ----------
+# ---------- direct API surface (for /v1/images/generations, /v1/videos/generations) ----------
 
 async def generate_image_raw(prompt: str, width: int, height: int, n: int) -> dict:
     """Used by /v1/images/generations. Returns the raw {urls, prompt} dict
@@ -311,4 +311,21 @@ async def generate_image_raw(prompt: str, width: int, height: int, n: int) -> di
     """
     return await _generate_image({
         "prompt": prompt, "width": width, "height": height, "num_images": n,
+    })
+
+
+async def generate_video_raw(
+    prompt: str,
+    duration: int = 4,
+    resolution: str = "1080p",
+    aspect_ratio: str = "16:9",
+    camera_motion: str = "none",
+) -> dict:
+    """Used by /v1/videos/generations. Returns {url, prompt} or {error}."""
+    return await _generate_video({
+        "prompt": prompt,
+        "duration": duration,
+        "resolution": resolution,
+        "aspect_ratio": aspect_ratio,
+        "camera_motion": camera_motion,
     })

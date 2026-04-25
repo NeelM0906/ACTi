@@ -205,6 +205,15 @@ async def chat_completions(request: Request):
     skill_lib: dict = request.app.state.skills
     client_passed_tools = bool(body.get("tools"))
 
+    # OWUI sends a `features` block to indicate which native toggles are on
+    # (image_generation, code_interpreter, web_search). When image OR video
+    # generation is toggled, the OWUI backend handles the gen call directly
+    # and posts the result back into the message — so we must NOT also let
+    # the model invoke our generate_* tool, or we'll get duplicate output.
+    features = body.get("features") or {}
+    suppress_image = bool(features.get("image_generation"))
+    suppress_video = bool(features.get("video_generation"))
+
     # Skill / media tools activate when the caller didn't bring its own.
     use_skills = bool(skill_lib) and not client_passed_tools
     use_media = media.media_enabled() and not client_passed_tools
@@ -252,11 +261,25 @@ async def chat_completions(request: Request):
         if use_skills:
             proxy_tools.append(skills.LOAD_SKILL_TOOL)
         if use_media:
-            proxy_tools.extend([media.GENERATE_IMAGE_TOOL, media.GENERATE_VIDEO_TOOL])
+            if not suppress_image:
+                proxy_tools.append(media.GENERATE_IMAGE_TOOL)
+            if not suppress_video:
+                proxy_tools.append(media.GENERATE_VIDEO_TOOL)
+        if suppress_image or suppress_video:
+            _log(f"[gateway] feature toggles active: "
+                 f"image_gen={'OWUI' if suppress_image else 'agent'} "
+                 f"video_gen={'OWUI' if suppress_video else 'agent'}")
         body["tools"] = proxy_tools
         body.setdefault("tool_choice", "auto")
 
         handlers = _build_tool_handlers(skill_lib)
+        # Drop matching handlers too, so a stale tool_call from an earlier
+        # turn (in a long conversation) can't accidentally re-invoke a
+        # suppressed tool either.
+        if suppress_image:
+            handlers.pop("generate_image", None)
+        if suppress_video:
+            handlers.pop("generate_video", None)
         if stream:
             return StreamingResponse(
                 run_agent_stream(
@@ -368,6 +391,68 @@ async def completions(request: Request):
 
 
 # ---------- /v1/images/generations ----------
+
+@app.post("/v1/videos/generations")
+async def videos_generations(request: Request):
+    """OpenAI-style video generation (custom endpoint, not in OpenAI's API).
+
+    Request body shape (intentionally permissive — accepts both our own
+    fields and the OpenAI image-style fields where they map):
+
+        {
+          "prompt":        str,               # required
+          "duration":      int,               # 1-8, default 4
+          "size":          "1920x1080" | ... | optional
+          "resolution":    "540p"|"720p"|"1080p", default "1080p"
+          "aspect_ratio":  "16:9"|"9:16",     default "16:9"
+          "camera_motion": "none"|"dolly_in"|..., default "none"
+        }
+
+    Response:
+
+        { "created": int, "data": [{"url": "/media/<sha>.mp4"}] }
+    """
+    _require_auth(request)
+    if not media.media_enabled():
+        return _error(503, "video generation is not configured on this deployment.",
+                      "service_unavailable")
+    try:
+        body = await request.json()
+    except Exception as e:
+        return _error(400, f"Invalid JSON body: {e}", "invalid_request_error")
+
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        return _error(400, "`prompt` is required", "invalid_request_error")
+
+    duration = max(1, min(int(body.get("duration", 4)), 8))
+    resolution = body.get("resolution") or "1080p"
+    aspect_ratio = body.get("aspect_ratio") or "16:9"
+    camera_motion = body.get("camera_motion") or "none"
+    # Accept OpenAI-style "size" → infer resolution + aspect_ratio when given
+    size = body.get("size")
+    if isinstance(size, str) and "x" in size:
+        try:
+            w, h = (int(x) for x in size.split("x", 1))
+            aspect_ratio = "9:16" if h > w else "16:9"
+            short_side = min(w, h)
+            resolution = "540p" if short_side <= 540 else (
+                "720p" if short_side <= 720 else "1080p"
+            )
+        except ValueError:
+            pass
+
+    result = await media.generate_video_raw(
+        prompt=prompt, duration=duration, resolution=resolution,
+        aspect_ratio=aspect_ratio, camera_motion=camera_motion,
+    )
+    if "error" in result:
+        return _error(502, result["error"], "upstream_error")
+    return {
+        "created": int(time.time()),
+        "data": [{"url": result["url"], "revised_prompt": prompt}],
+    }
+
 
 @app.post("/v1/images/generations")
 async def images_generations(request: Request):
