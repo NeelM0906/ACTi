@@ -309,129 +309,49 @@ async def chat_completions(request: Request):
 async def _stream_with_skill_loop(
     client: httpx.AsyncClient, body: dict, skills: dict[str, dict]
 ):
-    """SSE generator that taps the upstream stream and intercepts `load_skill`.
+    """Two-stage streaming with skill support.
 
-    The first deltas reveal whether the model is producing content or calling
-    a tool. We buffer until we know:
-      - first content delta -> flush buffer + forward all subsequent chunks verbatim
-      - tool_calls deltas    -> swallow them, accumulate the call, and once
-                                finish_reason="tool_calls" arrives, run the skill,
-                                append the tool result, and re-issue the stream
-                                from the top. The user-visible stream picks up
-                                from the model's post-skill response.
+    Stage 1 — non-streamed pre-flight with `enable_thinking=False` and
+        `tools=[load_skill]`. The model decides quickly whether to call a
+        skill (fast path: tool-call XML emitted in the first few tokens).
+        If it does, we read the SKILL.md body off disk and append a tool
+        result, then loop. If it doesn't, we exit stage 1 with the user's
+        original messages.
 
-    Bounded by MAX_SKILL_LOADS rounds; after the limit we fall through and
-    forward whatever the model emits verbatim (no further interception).
+    Stage 2 — streamed final response with the user's original
+        `chat_template_kwargs` (so thinking comes back if requested), no
+        tools, and the augmented messages from stage 1 if a skill loaded.
+        RadixAttention serves the prefix cache from stage 1, so stage 2's
+        prefill is essentially free.
+
+    Why stage 1 forces thinking off: the upstream model with thinking on
+    emits a long stream of `reasoning_content` deltas before deciding
+    between content and tool_call. An SSE tap that buffers across that
+    reasoning phase causes client-side timeouts (aiohttp's
+    TransferEncodingError). Disabling thinking makes the skill-vs-content
+    decision happen in the first few output tokens; stage 2 restores
+    thinking for the user-visible answer.
+
+    Bounded by MAX_SKILL_LOADS rounds.
     """
-    body = dict(body)  # avoid mutating the caller's dict across rounds
+    user_ctk = dict(body.get("chat_template_kwargs") or {})
+    user_max_tokens = body.get("max_tokens")
 
-    for round_idx in range(MAX_SKILL_LOADS + 1):
-        decided: str | None = None  # None | "content" | "tool_call"
-        buffered: list[bytes] = []
-        tool_calls: dict[int, dict] = {}
-        finish_reason: str | None = None
+    pre_body = dict(body)
+    pre_body["messages"] = list(body["messages"])
+    pre_body["stream"] = False
+    pre_body["tools"] = [LOAD_SKILL_TOOL]
+    pre_body.setdefault("tool_choice", "auto")
+    pre_body["chat_template_kwargs"] = {**user_ctk, "enable_thinking": False}
+    # Cap pre-flight: enough to emit a complete `load_skill` tool call XML
+    # (~30 tokens) without paying for a full content reply when no skill is needed.
+    pre_body["max_tokens"] = 256
 
+    augmented_messages: list | None = None
+
+    for _ in range(MAX_SKILL_LOADS + 1):
         try:
-            async with client.stream(
-                "POST", "/v1/chat/completions", json=body
-            ) as resp:
-                if resp.status_code != 200:
-                    async for chunk in resp.aiter_bytes():
-                        yield chunk
-                    return
-
-                line_buf = b""
-                async for chunk in resp.aiter_bytes():
-                    line_buf += chunk
-                    while True:
-                        idx = line_buf.find(b"\n")
-                        if idx == -1:
-                            break
-                        raw_line = line_buf[: idx + 1]
-                        line_buf = line_buf[idx + 1 :]
-                        stripped = raw_line.strip()
-                        if not stripped:
-                            # blank line — SSE event terminator. Forward only when streaming content.
-                            if decided == "content":
-                                yield raw_line
-                            else:
-                                buffered.append(raw_line)
-                            continue
-                        if not stripped.startswith(b"data:"):
-                            if decided == "content":
-                                yield raw_line
-                            else:
-                                buffered.append(raw_line)
-                            continue
-                        payload = stripped[5:].strip()
-                        if payload == b"[DONE]":
-                            if decided == "content":
-                                yield raw_line
-                            return
-                        try:
-                            event = json.loads(payload)
-                        except Exception:
-                            if decided == "content":
-                                yield raw_line
-                            else:
-                                buffered.append(raw_line)
-                            continue
-
-                        choice = (event.get("choices") or [{}])[0]
-                        delta = choice.get("delta") or {}
-                        fr = choice.get("finish_reason")
-
-                        if delta.get("content"):
-                            if decided is None:
-                                decided = "content"
-                                for b in buffered:
-                                    yield b
-                                buffered.clear()
-                            yield raw_line
-                        elif delta.get("tool_calls"):
-                            if decided is None:
-                                decided = "tool_call"
-                            for tc_d in delta["tool_calls"]:
-                                tcid = tc_d.get("index", 0)
-                                slot = tool_calls.setdefault(
-                                    tcid,
-                                    {
-                                        "id": tc_d.get("id") or "",
-                                        "type": "function",
-                                        "function": {"name": "", "arguments": ""},
-                                    },
-                                )
-                                if tc_d.get("id"):
-                                    slot["id"] = tc_d["id"]
-                                f_d = tc_d.get("function") or {}
-                                if f_d.get("name"):
-                                    slot["function"]["name"] += f_d["name"]
-                                if f_d.get("arguments"):
-                                    slot["function"]["arguments"] += f_d["arguments"]
-                        else:
-                            if decided is None:
-                                buffered.append(raw_line)
-                            elif decided == "content":
-                                yield raw_line
-
-                        if fr:
-                            finish_reason = fr
-                            if decided == "content":
-                                # forward the finish-marker chunk we just yielded;
-                                # next we expect a [DONE] line which is forwarded above
-                                pass
-                            elif decided == "tool_call" and fr == "tool_calls":
-                                # close the upstream stream, run skill loop
-                                break
-                            else:
-                                # decided is None and finish arrived (empty stream).
-                                # Flush buffer + this finish marker so the client sees a clean end.
-                                for b in buffered:
-                                    yield b
-                                buffered.clear()
-                                yield raw_line
-                    if finish_reason == "tool_calls" and decided == "tool_call":
-                        break
+            resp = await client.post("/v1/chat/completions", json=pre_body)
         except httpx.HTTPError as e:
             yield (
                 b'data: {"error":{"message":"'
@@ -439,51 +359,72 @@ async def _stream_with_skill_loop(
                 + b'","type":"upstream_error"}}\n\n'
             )
             return
-
-        if decided != "tool_call":
-            # Either content was streamed (we already forwarded everything),
-            # or the stream ended without producing anything we recognize.
+        if resp.status_code != 200:
+            # Surface upstream error to the client as a single SSE event.
+            yield b"data: " + resp.content + b"\n\n"
+            yield b"data: [DONE]\n\n"
             return
 
-        # Skill tool_call mode — execute and re-issue the stream.
+        data = resp.json()
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+        tool_calls = msg.get("tool_calls") or []
         load_calls = [
-            tc for tc in tool_calls.values()
+            tc for tc in tool_calls
             if (tc.get("function") or {}).get("name") == "load_skill"
         ]
         if not load_calls:
-            # The model called something that isn't load_skill. We never
-            # advertised any other tool, so this is an unexpected state —
-            # surface the raw assistant response and exit.
-            for b in buffered:
-                yield b
-            return
+            # No skill needed — exit pre-flight, stage 2 will use the original messages.
+            break
 
-        body["messages"].append({
+        # Append the assistant tool-call message and one tool result per call.
+        pre_body["messages"].append({
             "role": "assistant",
             "content": None,
-            "tool_calls": list(tool_calls.values()),
+            "tool_calls": tool_calls,
         })
         for tc in load_calls:
             try:
                 args = json.loads((tc.get("function") or {}).get("arguments") or "{}")
-            except Exception:
+            except Exception:  # noqa: BLE001
                 args = {}
             sname = args.get("name", "")
             sk = skills.get(sname)
             content = (
                 sk["body"] if sk
-                else f"ERROR: skill '{sname}' is not in the library."
+                else f"ERROR: skill '{sname}' is not in the library. Continue without."
             )
-            body["messages"].append({
+            pre_body["messages"].append({
                 "role": "tool",
                 "tool_call_id": tc.get("id", ""),
                 "name": "load_skill",
                 "content": content,
             })
-        # Loop: open a fresh upstream stream with the augmented messages.
+        augmented_messages = pre_body["messages"]
 
-    # Iteration cap reached.
-    return
+    # Stage 2 — streamed final response.
+    final_body = dict(body)
+    final_body["messages"] = augmented_messages if augmented_messages else body["messages"]
+    final_body["stream"] = True
+    final_body["chat_template_kwargs"] = user_ctk  # restore original thinking setting
+    if user_max_tokens is not None:
+        final_body["max_tokens"] = user_max_tokens
+    final_body.pop("tools", None)
+    final_body.pop("tool_choice", None)
+
+    try:
+        async with client.stream("POST", "/v1/chat/completions", json=final_body) as resp:
+            if resp.status_code != 200:
+                async for chunk in resp.aiter_bytes():
+                    yield chunk
+                return
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+    except httpx.HTTPError as e:
+        yield (
+            b'data: {"error":{"message":"'
+            + str(e).replace('"', "'").encode()
+            + b'","type":"upstream_error"}}\n\n'
+        )
 
 
 async def _run_with_skill_loop(
