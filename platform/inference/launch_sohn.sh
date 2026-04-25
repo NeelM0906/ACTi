@@ -23,6 +23,19 @@ ACTI_TENSOR_PARALLEL_SIZE="${ACTI_TENSOR_PARALLEL_SIZE:-1}"
 ACTI_ATTENTION_BACKEND="${ACTI_ATTENTION_BACKEND:-TRITON_ATTN}"
 ACTI_INFERENCE_PORT="${ACTI_INFERENCE_PORT:-8000}"
 
+# --- Throughput tuning ---
+# MTP (Multi-Token Prediction) speculative decoding. Requires the model
+# checkpoint to ship MTP weights (e.g. AMD's day-0 release for compatible
+# architectures). Set ACTI_SPECULATIVE_CONFIG to '' (empty) to disable.
+# 1.5–2× single-stream decode throughput when the draft is accepted.
+ACTI_SPECULATIVE_CONFIG="${ACTI_SPECULATIVE_CONFIG-{\"method\":\"mtp\",\"num_speculative_tokens\":2}}"
+
+# Sampler defaults merged on top of the model's generation_config.json.
+# These are recommended defaults for non-thinking-mode chat. Per-request
+# overrides from the API client (temperature/top_p/top_k) still take precedence.
+# Set ACTI_OVERRIDE_GENERATION_CONFIG to '' (empty) to disable.
+ACTI_OVERRIDE_GENERATION_CONFIG="${ACTI_OVERRIDE_GENERATION_CONFIG-{\"temperature\":0.7,\"top_p\":0.8,\"top_k\":20,\"repetition_penalty\":1.05}}"
+
 # --- Activate the inference Python env ---
 source /opt/conda/etc/profile.d/conda.sh
 conda activate "$ACTI_PYTHON_ENV"
@@ -46,6 +59,14 @@ mkdir -p "$ACTI_LOG_DIR"
 LOG="$ACTI_LOG_DIR/inference.log"
 echo "[$(date -Is)] launch_sohn.sh starting (Sohn served as model alias)" | tee -a "$LOG"
 
+EXTRA_ARGS=()
+if [ -n "$ACTI_SPECULATIVE_CONFIG" ]; then
+  EXTRA_ARGS+=(--speculative-config "$ACTI_SPECULATIVE_CONFIG")
+fi
+if [ -n "$ACTI_OVERRIDE_GENERATION_CONFIG" ]; then
+  EXTRA_ARGS+=(--override-generation-config "$ACTI_OVERRIDE_GENERATION_CONFIG")
+fi
+
 exec vllm serve "$ACTI_MODEL_ID" \
   --served-model-name Sohn \
   --tensor-parallel-size "$ACTI_TENSOR_PARALLEL_SIZE" \
@@ -56,6 +77,7 @@ exec vllm serve "$ACTI_MODEL_ID" \
   --tool-call-parser "$ACTI_TOOL_CALL_PARSER" \
   --enable-prefix-caching \
   --attention-backend "$ACTI_ATTENTION_BACKEND" \
+  "${EXTRA_ARGS[@]}" \
   --trust-remote-code \
   --host 0.0.0.0 \
   --port "$ACTI_INFERENCE_PORT" \
