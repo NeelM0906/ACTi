@@ -7,7 +7,7 @@ echo "=== [05] install platform artifacts ==="
 REPO_ROOT="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/.." &> /dev/null && pwd )"
 
 # Runtime install location
-sudo mkdir -p /opt/acti/{proxy,system_prompts,ui,status,inference}
+sudo mkdir -p /opt/acti/{proxy,system_prompts,ui,status,inference,skills}
 sudo cp "$REPO_ROOT/platform/proxy/sohn_proxy.py"           /opt/acti/proxy/
 sudo cp "$REPO_ROOT/platform/proxy/launch_proxy.sh"         /opt/acti/proxy/
 sudo cp "$REPO_ROOT/platform/system_prompts/sohn.txt"       /opt/acti/system_prompts/
@@ -17,6 +17,10 @@ sudo cp "$REPO_ROOT/platform/inference/launch_sohn.sh"      /opt/acti/inference/
 sudo cp "$REPO_ROOT/platform/inference/launch_sglang.sh"    /opt/acti/inference/
 sudo cp "$REPO_ROOT/platform/status/status_collector.py"    /opt/acti/status/
 sudo cp "$REPO_ROOT/platform/status/launch_status.sh"       /opt/acti/status/
+# Skill library — discovered by the proxy on startup. Each subdir must contain
+# a SKILL.md with a `name:` and `description:` in its YAML front matter.
+sudo rm -rf /opt/acti/skills
+sudo cp -r "$REPO_ROOT/platform/skills"                     /opt/acti/skills
 sudo chmod +x /opt/acti/*/launch_*.sh
 
 # State dirs

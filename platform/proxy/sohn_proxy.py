@@ -18,6 +18,7 @@ CORS:
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+import json
 import os
 import time
 import uuid
@@ -34,6 +35,8 @@ SYSTEM_PROMPT = Path(os.environ.get("ACTI_SYSTEM_PROMPT_PATH", "/opt/acti/system
 VLLM_URL = "http://127.0.0.1:8000"
 SERVED_NAME = "Sohn"
 API_KEYS_FILE = Path(os.environ.get("ACTI_API_KEY_FILE", "/var/lib/acti/api-keys.txt"))
+SKILLS_DIR = Path(os.environ.get("ACTI_SKILLS_DIR", "/opt/acti/skills"))
+MAX_SKILL_LOADS = int(os.environ.get("ACTI_MAX_SKILL_LOADS", "4"))
 
 
 def load_api_keys() -> set[str]:
@@ -47,6 +50,88 @@ def load_api_keys() -> set[str]:
     return keys
 
 
+# ---------- skill system ----------
+
+LOAD_SKILL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "load_skill",
+        "description": (
+            "Load the full instructions of a skill from Sohn's skill library. "
+            "Call this when the user's request matches a skill listed in <available_skills>. "
+            "The skill body is returned as the tool result; follow it for the rest of this turn."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "The skill name, e.g. design-md."},
+            },
+            "required": ["name"],
+        },
+    },
+}
+
+
+def _parse_frontmatter(text: str) -> tuple[dict, str]:
+    """Minimal `---`-fenced front matter parser. Returns (meta_dict, body)."""
+    if not text.startswith("---\n"):
+        return {}, text
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return {}, text
+    block, body = text[4:end], text[end + 5:]
+    meta: dict = {}
+    for line in block.splitlines():
+        if ":" not in line:
+            continue
+        k, _, v = line.partition(":")
+        meta[k.strip()] = v.strip().strip('"').strip("'")
+    return meta, body
+
+
+def load_skills() -> dict[str, dict]:
+    """Discover SKILL.md files under SKILLS_DIR. Returns {name: {description, body, path}}."""
+    skills: dict[str, dict] = {}
+    if not SKILLS_DIR.is_dir():
+        return skills
+    for skill_md in sorted(SKILLS_DIR.glob("*/SKILL.md")):
+        try:
+            meta, body = _parse_frontmatter(skill_md.read_text())
+        except Exception as e:  # noqa: BLE001
+            print(f"[sohn-proxy] skill {skill_md} unreadable: {e}")
+            continue
+        name = meta.get("name")
+        if not name:
+            print(f"[sohn-proxy] skill {skill_md} has no `name:` in front matter — skipped")
+            continue
+        skills[name] = {
+            "name": name,
+            "description": meta.get("description", ""),
+            "body": body.strip(),
+            "path": str(skill_md),
+        }
+    return skills
+
+
+def _skills_manifest_block(skills: dict[str, dict]) -> str:
+    """Short manifest injected into the system prompt for skill discovery."""
+    if not skills:
+        return ""
+    lines = [
+        "<available_skills>",
+        "Sohn has a skill library. Each entry below names a skill and its activation criteria. "
+        "Call the `load_skill` tool with the skill name to retrieve its full instructions; the "
+        "instructions are appended to the conversation as a tool result and you must follow them "
+        "for the remainder of the turn. Activate at most one skill per request, and only when the "
+        "description clearly matches the user's intent.",
+        "",
+    ]
+    for name, info in skills.items():
+        lines.append(f"- **{name}**: {info['description']}")
+    lines.append("</available_skills>")
+    return "\n".join(lines)
+
+
 # ---------- app lifespan ----------
 
 @asynccontextmanager
@@ -56,9 +141,12 @@ async def lifespan(app: FastAPI):
     )
     app.state.client = httpx.AsyncClient(base_url=VLLM_URL, timeout=None, limits=limits)
     app.state.api_keys = load_api_keys()
+    app.state.skills = load_skills()
+    app.state.skills_manifest = _skills_manifest_block(app.state.skills)
     print(
         f"[sohn-proxy] started. auth={'ON' if app.state.api_keys else 'OFF (dev)'} "
-        f"keys_loaded={len(app.state.api_keys)}"
+        f"keys_loaded={len(app.state.api_keys)} "
+        f"skills_loaded={list(app.state.skills.keys()) or 'none'}"
     )
     yield
     await app.state.client.aclose()
@@ -107,7 +195,10 @@ def _require_auth(request: Request) -> None:
         )
 
 
-def _inject_system_prompt(messages: list) -> list:
+def _inject_system_prompt(messages: list, skills_manifest: str = "") -> list:
+    base = SYSTEM_PROMPT
+    if skills_manifest:
+        base = base.rstrip() + "\n\n" + skills_manifest
     if messages and messages[0].get("role") == "system":
         user_system = messages[0].get("content", "")
         if isinstance(user_system, list):
@@ -115,12 +206,12 @@ def _inject_system_prompt(messages: list) -> list:
                 part.get("text", "") for part in user_system if isinstance(part, dict)
             )
         merged = (
-            SYSTEM_PROMPT
+            base
             + "\n\n---\n\n## Additional Context From User\n\n"
             + str(user_system)
         )
         return [{"role": "system", "content": merged}] + messages[1:]
-    return [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+    return [{"role": "system", "content": base}] + messages
 
 
 def _error(status: int, message: str, etype: str = "server_error") -> JSONResponse:
@@ -140,9 +231,24 @@ async def chat_completions(request: Request):
     except Exception as e:
         return _error(400, f"Invalid JSON body: {e}", "invalid_request_error")
 
-    body["messages"] = _inject_system_prompt(body.get("messages", []))
     body["model"] = SERVED_NAME
     stream = bool(body.get("stream"))
+    skills: dict = request.app.state.skills
+    client_passed_tools = bool(body.get("tools"))
+
+    # Skill system activates only when:
+    #   - the proxy has skills loaded, AND
+    #   - the client did not bring its own tools (we don't want to mix our internal
+    #     `load_skill` with caller-defined tools — that would force the caller to
+    #     execute a tool they did not register), AND
+    #   - the request is non-streaming (the streaming code path is left untouched
+    #     for backwards compatibility; tool-loop handling under SSE is harder).
+    use_skills = bool(skills) and not client_passed_tools and not stream
+
+    body["messages"] = _inject_system_prompt(
+        body.get("messages", []),
+        skills_manifest=request.app.state.skills_manifest if use_skills else "",
+    )
 
     client: httpx.AsyncClient = request.app.state.client
 
@@ -158,11 +264,77 @@ async def chat_completions(request: Request):
                 yield f"data: {{\"error\":{{\"message\":\"{e}\",\"type\":\"upstream_error\"}}}}\n\n".encode()
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
+    if use_skills:
+        body["tools"] = [LOAD_SKILL_TOOL]
+        body.setdefault("tool_choice", "auto")
+        return await _run_with_skill_loop(client, body, skills)
+
     try:
         resp = await client.post("/v1/chat/completions", json=body)
     except httpx.HTTPError as e:
         return _error(502, f"Upstream error: {e}", "upstream_error")
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
+
+
+async def _run_with_skill_loop(
+    client: httpx.AsyncClient, body: dict, skills: dict[str, dict]
+) -> JSONResponse:
+    """Run the inference engine in a loop, executing `load_skill` tool calls in-process.
+
+    Stops as soon as the model returns a turn that contains no `load_skill` tool call,
+    or after MAX_SKILL_LOADS rounds (whichever is first). Strips our injected tool
+    plumbing out of the final response shape so callers do not see it.
+    """
+    last_data: dict | None = None
+    for _ in range(MAX_SKILL_LOADS + 1):
+        try:
+            resp = await client.post("/v1/chat/completions", json=body)
+        except httpx.HTTPError as e:
+            return _error(502, f"Upstream error: {e}", "upstream_error")
+        if resp.status_code != 200:
+            return JSONResponse(content=resp.json(), status_code=resp.status_code)
+
+        data = resp.json()
+        last_data = data
+        choice = (data.get("choices") or [{}])[0]
+        msg = choice.get("message", {}) or {}
+        tool_calls = msg.get("tool_calls") or []
+        load_calls = [
+            t for t in tool_calls
+            if (t.get("function") or {}).get("name") == "load_skill"
+        ]
+        if not load_calls:
+            # Either no tool calls at all, or the model is asking for a non-skill
+            # tool — but we never advertised any other tools, so this should not
+            # happen. Either way, return as-is.
+            return JSONResponse(content=data, status_code=200)
+
+        # Append the assistant's tool-call message and a tool-result for each load.
+        body["messages"].append(msg)
+        for tc in load_calls:
+            try:
+                args = json.loads((tc.get("function") or {}).get("arguments") or "{}")
+            except Exception:  # noqa: BLE001
+                args = {}
+            sname = args.get("name", "")
+            sk = skills.get(sname)
+            if sk:
+                content = sk["body"]
+            else:
+                content = (
+                    f"ERROR: skill '{sname}' is not available. "
+                    f"Known skills: {sorted(skills.keys())}. "
+                    f"Continue without loading any skill."
+                )
+            body["messages"].append({
+                "role": "tool",
+                "tool_call_id": tc.get("id", ""),
+                "name": "load_skill",
+                "content": content,
+            })
+
+    # Iteration cap reached — return whatever the model last produced.
+    return JSONResponse(content=last_data or {}, status_code=200)
 
 
 @app.post("/v1/completions")
