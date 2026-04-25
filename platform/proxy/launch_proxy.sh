@@ -18,4 +18,9 @@ LOG="$ACTI_LOG_DIR/proxy.log"
 echo "[$(date -Is)] proxy launching on :$ACTI_PROXY_PORT" | tee -a "$LOG"
 
 export SOHN_PROXY_PORT="$ACTI_PROXY_PORT"
+
+# Optional: load media (Lumen) credentials from a non-tracked env file.
+# Keep this OUTSIDE the repo. Format: shell-style `KEY=VALUE` lines.
+[ -f /etc/acti/media.env ] && set -a && . /etc/acti/media.env && set +a
+
 exec python "$SCRIPT_DIR/sohn_proxy.py" 2>&1 | tee -a "$LOG"

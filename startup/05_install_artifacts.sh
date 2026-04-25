@@ -25,9 +25,12 @@ sudo cp -r "$REPO_ROOT/platform/skills"                     /opt/acti/skills
 sudo chmod +x /opt/acti/*/launch_*.sh /opt/acti/skills/launch_skill_sync.sh
 
 # State dirs
-sudo mkdir -p /var/lib/acti /var/log/acti /var/lib/acti/openwebui /var/lib/acti/hf-cache
+sudo mkdir -p /var/lib/acti /var/log/acti /var/lib/acti/openwebui \
+              /var/lib/acti/hf-cache /var/lib/acti/media
 [ -f /var/lib/acti/api-keys.txt ] || sudo touch /var/lib/acti/api-keys.txt
 sudo chmod 600 /var/lib/acti/api-keys.txt
+# Media dir must be readable by nginx (which runs as www-data on Ubuntu).
+sudo chmod 755 /var/lib/acti/media
 
 # Status page (nginx-readable)
 sudo mkdir -p /usr/share/nginx/html/acti-status
