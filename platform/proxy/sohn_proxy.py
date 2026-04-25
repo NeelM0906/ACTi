@@ -301,25 +301,34 @@ async def _lumen_generate_video(args: dict) -> dict:
 
 
 def _format_media_tool_result(name: str, args: dict, result: dict) -> str:
-    """Stringify the result of a media tool call for the model to consume."""
+    """Stringify the result of a media tool call for the model to consume.
+
+    The instruction text deliberately omits the literal embed snippet to
+    avoid the model parroting it back twice (once from the tool result,
+    once from its own reply). We give the URL and a one-line directive;
+    the model fills in the markup.
+    """
     if "error" in result:
         return f"ERROR: {result['error']}"
     if name == "generate_image":
-        lines = [f"Generated {len(result['urls'])} image(s) for prompt: {result['prompt']!r}."]
-        for i, u in enumerate(result["urls"]):
-            lines.append(f"- url[{i}]: {u}")
+        urls = result.get("urls", [])
+        lines = ["Image generation complete. URLs:"]
+        for u in urls:
+            lines.append(f"  {u}")
+        lines.append("")
         lines.append(
-            "Embed each url in your final reply using markdown image syntax: "
-            "![brief alt](url). Do not call generate_image again."
+            "In your reply, write a one-sentence caption and embed each URL "
+            "EXACTLY ONCE using markdown image syntax. Do not repeat any URL. "
+            "Do not call generate_image again."
         )
         return "\n".join(lines)
     if name == "generate_video":
+        url = result.get("url", "")
         return (
-            f"Generated a video for prompt: {result['prompt']!r}.\n"
-            f"- url: {result['url']}\n"
-            f"Embed the url in your final reply using an HTML5 video tag: "
-            f"<video controls src=\"{result['url']}\"></video>. "
-            f"Do not call generate_video again."
+            f"Video generation complete. URL:\n  {url}\n\n"
+            f"In your reply, write a one-sentence caption and embed the URL "
+            f"EXACTLY ONCE using an HTML5 video tag with a src attribute. "
+            f"Do not write the tag more than once. Do not call generate_video again."
         )
     return json.dumps(result)
 
