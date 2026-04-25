@@ -19,9 +19,11 @@ sudo cp "$REPO_ROOT/platform/status/status_collector.py"    /opt/acti/status/
 sudo cp "$REPO_ROOT/platform/status/launch_status.sh"       /opt/acti/status/
 # Skill library — discovered by the proxy on startup. Each subdir must contain
 # a SKILL.md with a `name:` and `description:` in its YAML front matter.
+# _sync.py + launch_skill_sync.sh mirror the file system into OWUI's `skill`
+# table so skills authored on disk show up in Workspace -> Skills.
 sudo rm -rf /opt/acti/skills
 sudo cp -r "$REPO_ROOT/platform/skills"                     /opt/acti/skills
-sudo chmod +x /opt/acti/*/launch_*.sh
+sudo chmod +x /opt/acti/*/launch_*.sh /opt/acti/skills/launch_skill_sync.sh
 
 # State dirs
 sudo mkdir -p /var/lib/acti /var/log/acti /var/lib/acti/openwebui /var/lib/acti/hf-cache

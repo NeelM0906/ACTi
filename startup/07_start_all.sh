@@ -59,9 +59,13 @@ for i in $(seq 1 90); do
   sleep 5
 done
 
-start_service acti-proxy   "/opt/acti/proxy/launch_proxy.sh"
-start_service acti-ui      "/opt/acti/ui/launch_owui.sh"
-start_service acti-status  "/opt/acti/status/launch_status.sh"
+start_service acti-proxy       "/opt/acti/proxy/launch_proxy.sh"
+start_service acti-ui          "/opt/acti/ui/launch_owui.sh"
+start_service acti-status      "/opt/acti/status/launch_status.sh"
+# Mirrors /opt/acti/skills/<name>/SKILL.md into OWUI's `skill` table on a
+# polling loop. The proxy hot-reloads the same files in-process, so adding a
+# SKILL.md propagates to BOTH the model side and the OWUI UI within seconds.
+start_service acti-skill-sync  "/opt/acti/skills/launch_skill_sync.sh"
 
 sleep 4
 echo
@@ -69,7 +73,7 @@ tmux ls
 echo
 echo "  health: $(curl -sS http://127.0.0.1:8888/sohn-health || echo unavailable)"
 echo
-echo "[07] all services started."
+echo "[07] all services started (acti-inference, acti-proxy, acti-ui, acti-status, acti-skill-sync)."
 echo "  chat UI :   http://<host>:8888/"
 echo "  API     :   http://<host>:8888/v1"
 echo "  status  :   http://<host>:8888/status"

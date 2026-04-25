@@ -113,6 +113,32 @@ def load_skills() -> dict[str, dict]:
     return skills
 
 
+def _skills_dir_mtime() -> float:
+    """Latest mtime across SKILLS_DIR and every SKILL.md under it. Used for hot-reload."""
+    if not SKILLS_DIR.is_dir():
+        return 0.0
+    try:
+        latest = SKILLS_DIR.stat().st_mtime
+    except FileNotFoundError:
+        return 0.0
+    for p in SKILLS_DIR.glob("*/SKILL.md"):
+        try:
+            latest = max(latest, p.stat().st_mtime)
+        except FileNotFoundError:
+            continue
+    return latest
+
+
+def _maybe_reload_skills(state) -> None:
+    """Re-scan SKILLS_DIR if any SKILL.md changed since the last load. Cheap (one stat per file)."""
+    latest = _skills_dir_mtime()
+    if latest > getattr(state, "skills_mtime", 0.0):
+        state.skills = load_skills()
+        state.skills_manifest = _skills_manifest_block(state.skills)
+        state.skills_mtime = latest
+        print(f"[sohn-proxy] skills hot-reloaded: {list(state.skills.keys()) or 'none'}", flush=True)
+
+
 def _skills_manifest_block(skills: dict[str, dict]) -> str:
     """Short manifest injected into the system prompt for skill discovery."""
     if not skills:
@@ -143,6 +169,7 @@ async def lifespan(app: FastAPI):
     app.state.api_keys = load_api_keys()
     app.state.skills = load_skills()
     app.state.skills_manifest = _skills_manifest_block(app.state.skills)
+    app.state.skills_mtime = _skills_dir_mtime()
     print(
         f"[sohn-proxy] started. auth={'ON' if app.state.api_keys else 'OFF (dev)'} "
         f"keys_loaded={len(app.state.api_keys)} "
@@ -233,6 +260,7 @@ async def chat_completions(request: Request):
 
     body["model"] = SERVED_NAME
     stream = bool(body.get("stream"))
+    _maybe_reload_skills(request.app.state)
     skills: dict = request.app.state.skills
     client_passed_tools = bool(body.get("tools"))
 
