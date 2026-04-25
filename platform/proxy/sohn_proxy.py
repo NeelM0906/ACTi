@@ -304,32 +304,34 @@ async def _lumen_generate_video(args: dict) -> dict:
 def _format_media_tool_result(name: str, args: dict, result: dict) -> str:
     """Stringify the result of a media tool call for the model to consume.
 
-    The instruction text deliberately omits the literal embed snippet to
-    avoid the model parroting it back twice (once from the tool result,
-    once from its own reply). We give the URL and a one-line directive;
-    the model fills in the markup.
+    Avoids embedding the literal markup of the answer. the base model with
+    thinking on has a strong tendency to parrot fully-formed snippets it
+    sees in tool results — that caused the earlier 'video tag rendered
+    twice' bug. Instead we describe the format and give a placeholder.
     """
     if "error" in result:
         return f"ERROR: {result['error']}"
     if name == "generate_image":
         urls = result.get("urls", [])
-        lines = ["Image generation complete. URLs:"]
-        for u in urls:
-            lines.append(f"  {u}")
-        lines.append("")
+        prompt = result.get("prompt", "")
+        lines = [f"Generated {len(urls)} image(s) for prompt: {prompt!r}."]
+        for i, u in enumerate(urls):
+            lines.append(f"- url[{i}]: {u}")
         lines.append(
-            "In your reply, write a one-sentence caption and embed each URL "
-            "EXACTLY ONCE using markdown image syntax. Do not repeat any URL. "
+            "Embed each url in your final reply using markdown image syntax: "
+            "![brief alt](url). Embed each url exactly once. "
             "Do not call generate_image again."
         )
         return "\n".join(lines)
     if name == "generate_video":
         url = result.get("url", "")
+        prompt = result.get("prompt", "")
         return (
-            f"Video generation complete. URL:\n  {url}\n\n"
-            f"In your reply, write a one-sentence caption and embed the URL "
-            f"EXACTLY ONCE using an HTML5 video tag with a src attribute. "
-            f"Do not write the tag more than once. Do not call generate_video again."
+            f"Generated a video for prompt: {prompt!r}.\n"
+            f"- url: {url}\n"
+            f"Embed the url in your final reply using an HTML5 video element "
+            f"with `controls` and a `src` attribute. Embed the url exactly once. "
+            f"Do not call generate_video again."
         )
     return json.dumps(result)
 
