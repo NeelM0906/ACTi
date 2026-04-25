@@ -8,7 +8,10 @@ REPO_ROOT="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/.." &> /dev/null && pwd
 
 # Runtime install location
 sudo mkdir -p /opt/acti/{proxy,system_prompts,ui,status,inference,skills}
-sudo cp "$REPO_ROOT/platform/proxy/sohn_proxy.py"           /opt/acti/proxy/
+sudo cp "$REPO_ROOT/platform/proxy/gateway.py"              /opt/acti/proxy/
+sudo cp "$REPO_ROOT/platform/proxy/spark.py"                /opt/acti/proxy/
+sudo cp "$REPO_ROOT/platform/proxy/skills.py"               /opt/acti/proxy/
+sudo cp "$REPO_ROOT/platform/proxy/media.py"                /opt/acti/proxy/
 sudo cp "$REPO_ROOT/platform/proxy/launch_proxy.sh"         /opt/acti/proxy/
 sudo cp "$REPO_ROOT/platform/system_prompts/sohn.txt"       /opt/acti/system_prompts/
 sudo cp "$REPO_ROOT/platform/ui/launch_owui.sh"             /opt/acti/ui/

@@ -413,3 +413,73 @@ async def run_agent_stream(
                 await task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
+
+
+async def run_agent_sync(
+    *,
+    client: httpx.AsyncClient,
+    body: dict,
+    tool_handlers: dict[str, ToolHandler],
+    max_turns: int = 4,
+    log: Callable[[str], None] = _default_log,
+) -> dict:
+    """Non-streaming twin of run_agent_stream.
+
+    Used for /v1/chat/completions when the caller passed `stream: false`.
+    Drives the same agent loop synchronously and returns the final
+    OpenAI-shape chat completion JSON.
+
+    The streaming variant is preferred for user-facing UX; this exists
+    for API consumers (SDKs, webhooks) that explicitly opted out.
+    """
+    if max_turns < 1:
+        raise ValueError("max_turns must be >= 1")
+    last_data: dict | None = None
+    sync_body = dict(body)
+    sync_body["stream"] = False
+
+    for turn in range(max_turns):
+        t0 = time.time()
+        try:
+            resp = await client.post("/v1/chat/completions", json=sync_body)
+        except httpx.HTTPError as e:
+            return {"error": {"message": f"upstream error: {e}", "type": "upstream_error"}}
+        if resp.status_code != 200:
+            return resp.json() if resp.content else {"error": {"message": "engine error"}}
+
+        data = resp.json()
+        last_data = data
+        choice = (data.get("choices") or [{}])[0]
+        msg = choice.get("message", {}) or {}
+        tool_calls = msg.get("tool_calls") or []
+        proxy_calls = [
+            t for t in tool_calls
+            if (t.get("function") or {}).get("name") in tool_handlers
+        ]
+        log(f"[spark/sync] turn {turn+1}: {time.time()-t0:.1f}s, "
+            f"tool_calls=[{','.join((tc.get('function') or {}).get('name','?') for tc in proxy_calls) or '-'}]")
+        if not proxy_calls:
+            return data
+
+        sync_body["messages"].append(msg)
+        for tc in proxy_calls:
+            fn = tc.get("function") or {}
+            tname = fn.get("name", "")
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except Exception:
+                args = {}
+            handler = tool_handlers[tname]
+            try:
+                content = await handler(args)
+            except Exception as e:
+                content = f"ERROR: tool '{tname}' raised: {e}"
+            sync_body["messages"].append({
+                "role": "tool",
+                "tool_call_id": tc.get("id", ""),
+                "name": tname,
+                "content": content,
+            })
+
+    log(f"[spark/sync] hit max_turns={max_turns}")
+    return last_data or {}
