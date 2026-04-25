@@ -1,0 +1,47 @@
+# Operator secrets — never commit
+startup/.env
+**/api-keys.txt
+**/*.token
+.env
+
+# Model weights and caches
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.gguf
+hf-cache/
+**/hf-cache/
+.cache/
+
+# OpenWebUI runtime state (sqlite + uploads)
+open-webui-data/
+**/open-webui-data/
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+**/*.log
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Build artifacts
+dist/
+build/
+node_modules/

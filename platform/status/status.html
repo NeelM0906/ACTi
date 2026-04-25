@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ACTi · Status</title>
+  <style>
+    :root {
+      --bg: #0b0d12;
+      --panel: #11141b;
+      --border: #1f242e;
+      --text: #e6e8ec;
+      --muted: #8b94a3;
+      --good: #22c55e;
+      --warn: #f59e0b;
+      --bad: #ef4444;
+      --accent: #4338ca;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: var(--bg); color: var(--text); min-height: 100vh;
+    }
+    .wrap { max-width: 920px; margin: 0 auto; padding: 48px 24px 80px; }
+    header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 32px; }
+    h1 { margin: 0; font-size: 22px; font-weight: 600; }
+    h1 .sub { color: var(--muted); font-weight: 400; margin-left: 8px; }
+    .live { font-size: 12px; color: var(--muted); }
+    .live::before {
+      content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: var(--good); margin-right: 8px; animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    .banner {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 12px; padding: 24px; margin-bottom: 24px;
+      display: flex; align-items: center; gap: 16px;
+    }
+    .banner.ok    { border-left: 4px solid var(--good); }
+    .banner.warn  { border-left: 4px solid var(--warn); }
+    .banner.down  { border-left: 4px solid var(--bad); }
+    .banner-icon { font-size: 28px; }
+    .banner-text strong { display: block; font-size: 16px; }
+    .banner-text small { color: var(--muted); }
+
+    .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+    @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+
+    .card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 12px; padding: 20px;
+    }
+    .card h3 { margin: 0 0 12px; font-size: 12px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+    .metric { font-size: 24px; font-weight: 600; }
+    .metric small { color: var(--muted); font-size: 12px; font-weight: 400; }
+
+    .services { background: var(--panel); border: 1px solid var(--border);
+      border-radius: 12px; padding: 20px; margin-bottom: 24px; }
+    .services h2 { margin: 0 0 16px; font-size: 13px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+    .svc { display: flex; align-items: center; padding: 10px 0;
+      border-bottom: 1px solid var(--border); }
+    .svc:last-child { border-bottom: none; }
+    .svc .dot { width: 10px; height: 10px; border-radius: 50%; margin-right: 12px; }
+    .svc .name { flex: 1; }
+    .svc .state { color: var(--muted); font-size: 12px; }
+    .dot.ok { background: var(--good); }
+    .dot.warn { background: var(--warn); }
+    .dot.bad { background: var(--bad); }
+
+    .history { background: var(--panel); border: 1px solid var(--border);
+      border-radius: 12px; padding: 20px; }
+    .history h2 { margin: 0 0 12px; font-size: 13px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+    .bars { display: flex; gap: 2px; height: 40px; align-items: stretch; }
+    .bar { flex: 1; background: var(--good); border-radius: 2px; min-width: 2px; opacity: 0.85; }
+    .bar.warn { background: var(--warn); }
+    .bar.bad  { background: var(--bad); }
+    .bar.empty { background: var(--border); opacity: 0.3; }
+    .bars-axis { display: flex; justify-content: space-between;
+      font-size: 11px; color: var(--muted); margin-top: 8px; }
+
+    footer { color: var(--muted); font-size: 12px; margin-top: 48px; text-align: center; }
+    footer a { color: var(--muted); }
+    .version { color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>ACTi <span class="sub">· status</span></h1>
+    <span class="live" id="live">live</span>
+  </header>
+
+  <div class="banner" id="banner">
+    <div class="banner-icon" id="banner-icon">●</div>
+    <div class="banner-text">
+      <strong id="banner-title">Checking…</strong>
+      <small id="banner-sub">probing endpoints</small>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Model</h3>
+      <div class="metric">Sohn</div>
+      <small>v0.0.1</small>
+    </div>
+    <div class="card">
+      <h3>Uptime (24h)</h3>
+      <div class="metric"><span id="m-uptime">—</span><small> %</small></div>
+      <small id="m-uptime-detail">based on minute-resolution probes</small>
+    </div>
+    <div class="card">
+      <h3>Last incident</h3>
+      <div class="metric" id="m-incident" style="font-size:18px">—</div>
+      <small id="m-incident-detail"></small>
+    </div>
+  </div>
+
+  <div class="services">
+    <h2>Service health</h2>
+    <div class="svc"><span class="dot" id="d-sohn"></span><span class="name">Sohn</span><span class="state" id="s-sohn">—</span></div>
+    <div class="svc"><span class="dot" id="d-platform"></span><span class="name">ACTi Platform</span><span class="state" id="s-platform">—</span></div>
+  </div>
+
+  <div class="history">
+    <h2>Last 24 hours</h2>
+    <div class="bars" id="bars"></div>
+    <div class="bars-axis"><span>24h ago</span><span>now</span></div>
+  </div>
+
+  <footer>
+    auto-refresh every 10s · last update: <span id="last-upd">—</span>
+    &nbsp;·&nbsp;<span class="version">ACTi v0.0.1</span>
+  </footer>
+</div>
+
+<script>
+async function probe(url) {
+  try {
+    const r = await fetch(url, { cache: "no-store" });
+    return { ok: r.ok, status: r.status };
+  } catch (e) {
+    return { ok: false, status: 0, error: String(e) };
+  }
+}
+
+function setDot(id, status) {
+  const el = document.getElementById(id);
+  el.classList.remove("ok", "warn", "bad");
+  el.classList.add(status === "ok" ? "ok" : status === "warn" ? "warn" : "bad");
+}
+
+async function tick() {
+  // Sohn = LLM stack (proxy + engine, both must be up)
+  // ACTi Platform = the chat UI
+  const [sohn, platform] = await Promise.all([
+    probe("/sohn-health"),
+    probe("/api/config"),
+  ]);
+
+  // Sohn proxy /sohn-health embeds engine status — both must be healthy
+  let sohnReady = false;
+  if (sohn.ok) {
+    try {
+      const r = await fetch("/sohn-health", { cache: "no-store" });
+      const j = await r.json();
+      sohnReady = j.status === "ok";
+    } catch {}
+  }
+
+  setDot("d-sohn", sohnReady ? "ok" : "bad");
+  document.getElementById("s-sohn").textContent = sohnReady ? "Operational" : "Unavailable";
+
+  setDot("d-platform", platform.ok ? "ok" : "bad");
+  document.getElementById("s-platform").textContent = platform.ok ? "Operational" : "Unavailable";
+
+  // Composite banner
+  const allOk = sohnReady && platform.ok;
+  const banner = document.getElementById("banner");
+  banner.classList.remove("ok", "warn", "down");
+  if (allOk) {
+    banner.classList.add("ok");
+    document.getElementById("banner-icon").textContent = "✓";
+    document.getElementById("banner-icon").style.color = "var(--good)";
+    document.getElementById("banner-title").textContent = "All systems operational";
+    document.getElementById("banner-sub").textContent = "Sohn and the ACTi Platform are responding normally";
+  } else if (sohnReady || platform.ok) {
+    banner.classList.add("warn");
+    document.getElementById("banner-icon").textContent = "!";
+    document.getElementById("banner-icon").style.color = "var(--warn)";
+    document.getElementById("banner-title").textContent = "Partial outage";
+    document.getElementById("banner-sub").textContent = "Some services are degraded";
+  } else {
+    banner.classList.add("down");
+    document.getElementById("banner-icon").textContent = "✗";
+    document.getElementById("banner-icon").style.color = "var(--bad)";
+    document.getElementById("banner-title").textContent = "Service unavailable";
+    document.getElementById("banner-sub").textContent = "Cannot reach endpoints";
+  }
+
+  // Pull historical record from the collector
+  try {
+    const histR = await fetch("/status/history.json", { cache: "no-store" });
+    if (histR.ok) {
+      const hist = await histR.json();
+      renderHistory(hist);
+    }
+  } catch {}
+
+  document.getElementById("last-upd").textContent = new Date().toLocaleTimeString();
+}
+
+function renderHistory(hist) {
+  const points = hist.points || [];
+  const buckets = 60;
+  const now = Date.now();
+  const windowMs = 24 * 60 * 60 * 1000;
+  const bucketMs = windowMs / buckets;
+
+  const grid = Array.from({ length: buckets }, () => ({ ok: 0, fail: 0 }));
+  for (const p of points) {
+    const age = now - p.ts;
+    if (age < 0 || age >= windowMs) continue;
+    const idx = buckets - 1 - Math.floor(age / bucketMs);
+    if (idx < 0 || idx >= buckets) continue;
+    if (p.ok) grid[idx].ok++; else grid[idx].fail++;
+  }
+
+  const barsEl = document.getElementById("bars");
+  barsEl.innerHTML = "";
+  for (const b of grid) {
+    const div = document.createElement("div");
+    div.className = "bar";
+    if (b.ok === 0 && b.fail === 0) div.classList.add("empty");
+    else if (b.fail === 0) {} // ok stays default
+    else if (b.ok > b.fail) div.classList.add("warn");
+    else div.classList.add("bad");
+    barsEl.appendChild(div);
+  }
+
+  const total = points.filter(p => now - p.ts < windowMs);
+  const okCnt = total.filter(p => p.ok).length;
+  const pct = total.length ? ((okCnt / total.length) * 100).toFixed(2) : "—";
+  document.getElementById("m-uptime").textContent = pct;
+  document.getElementById("m-uptime-detail").textContent = `${total.length} probes · ${total.length - okCnt} failures`;
+
+  const fails = total.filter(p => !p.ok).sort((a, b) => b.ts - a.ts);
+  if (fails.length === 0) {
+    document.getElementById("m-incident").textContent = "None";
+    document.getElementById("m-incident-detail").textContent = "in the last 24h";
+  } else {
+    const ago = Math.round((now - fails[0].ts) / 60000);
+    document.getElementById("m-incident").textContent = ago < 60 ? `${ago}m ago` : `${Math.round(ago/60)}h ago`;
+    document.getElementById("m-incident-detail").textContent = "auto-recovered";
+  }
+}
+
+tick();
+setInterval(tick, 10000);
+</script>
+</body>
+</html>
