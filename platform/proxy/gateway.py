@@ -222,11 +222,16 @@ async def chat_completions(request: Request):
 
     # Cortex hooks for the agent loop.
     async def _between_turns(msgs: list[dict]) -> list[dict]:
-        if cortex.should_compact(
-            msgs,
+        # Exact token count from the engine's own tokenizer (~1-2ms).
+        # Accounts for chat-template overhead the char estimate misses.
+        triggered, n_tok = await cortex.should_compact_exact(
+            client, msgs,
             max_tokens=CONTEXT_WINDOW_TOKENS,
             buffer_tokens=COMPACT_BUFFER_TOKENS,
-        ):
+            served_name=SERVED_NAME,
+        )
+        if triggered:
+            _log(f"[gateway] compaction triggered: {n_tok:,} >= {CONTEXT_WINDOW_TOKENS-COMPACT_BUFFER_TOKENS:,}")
             return await cortex.compact(
                 client=client, messages=msgs, served_name=SERVED_NAME,
             )

@@ -39,8 +39,10 @@ PUBLIC API
 
 DESIGN NOTES
 
-  - Token estimation is char-based (`chars / 3.5`). Within ±10% for
-    English text. Replace with a real tokenizer later if it matters.
+  - Token counting uses the engine's own tokenizer via /v1/messages/
+    count_tokens (1–2ms localhost call, exact down to the chat template).
+    A char-based heuristic (`chars / 3.5`) is kept as a synchronous
+    fallback for tests and offline tools.
   - Memory files have YAML-ish frontmatter (name, description, type).
   - All memory writes go through atomic-rename for crash safety.
   - The compaction call REUSES the engine's prefix cache by sending
@@ -91,10 +93,15 @@ def _default_log(msg: str) -> None:
     print(msg, file=sys.stdout, flush=True)
 
 
-# ---------- token estimation ----------
+# ---------- token counting ----------
 
 def estimate_tokens(messages: list[dict]) -> int:
-    """Char-based token count across all messages. Microseconds-fast."""
+    """Char-based fallback estimate. Microseconds-fast, ±10% accuracy.
+
+    Used when the engine isn't available (offline tests) or as a quick
+    sanity bound. For real production checks, prefer count_tokens()
+    which calls the engine's tokenizer.
+    """
     total_chars = 0
     for m in messages:
         c = m.get("content")
@@ -104,7 +111,6 @@ def estimate_tokens(messages: list[dict]) -> int:
             for part in c:
                 if isinstance(part, dict):
                     total_chars += len(part.get("text", ""))
-        # tool_calls: roughly the JSON length of the calls
         tc = m.get("tool_calls")
         if tc:
             try:
@@ -112,6 +118,35 @@ def estimate_tokens(messages: list[dict]) -> int:
             except Exception:
                 pass
     return int(total_chars / CHARS_PER_TOKEN)
+
+
+async def count_tokens(
+    client: httpx.AsyncClient,
+    messages: list[dict],
+    served_name: str = "Sohn",
+) -> int:
+    """Exact token count from the engine's tokenizer.
+
+    Calls SGLang's /v1/messages/count_tokens — accounts for chat template
+    overhead (role tokens, tool schemas, system prompt boilerplate) that
+    the char-based estimate misses entirely. Localhost call, ~1–2 ms.
+
+    Falls back to estimate_tokens() if the request fails.
+    """
+    try:
+        resp = await client.post(
+            "/v1/messages/count_tokens",
+            json={"model": served_name, "messages": messages},
+            timeout=5.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            n = data.get("input_tokens")
+            if isinstance(n, int):
+                return n
+    except (httpx.HTTPError, ValueError):
+        pass
+    return estimate_tokens(messages)
 
 
 # ---------- compaction ----------
@@ -122,13 +157,32 @@ def should_compact(
     max_tokens: int = 256_000,
     buffer_tokens: int = DEFAULT_BUFFER_TOKENS,
 ) -> bool:
-    """Cheap predicate: are we approaching the engine's context cap?
+    """Synchronous predicate using the char-based estimate.
 
-    Returns True iff the conversation's estimated token count is within
-    `buffer_tokens` of `max_tokens`. Safe to call between every agent
-    turn — runs in microseconds.
+    Microseconds-fast, ±10% accuracy. Useful as a cheap pre-check before
+    paying the (still small) HTTP round-trip cost of the exact counter.
+    For production, prefer should_compact_exact() — the char estimator
+    can undercount by ~2x once chat template overhead is included.
     """
     return estimate_tokens(messages) >= (max_tokens - buffer_tokens)
+
+
+async def should_compact_exact(
+    client: httpx.AsyncClient,
+    messages: list[dict],
+    *,
+    max_tokens: int = 256_000,
+    buffer_tokens: int = DEFAULT_BUFFER_TOKENS,
+    served_name: str = "Sohn",
+) -> tuple[bool, int]:
+    """Exact predicate using the engine's own tokenizer.
+
+    Returns (should_compact, current_token_count). The token count is
+    returned alongside the bool so the caller can log it without a
+    second tokenize call.
+    """
+    n = await count_tokens(client, messages, served_name=served_name)
+    return n >= (max_tokens - buffer_tokens), n
 
 
 async def compact(
