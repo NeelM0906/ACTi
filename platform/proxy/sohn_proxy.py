@@ -39,7 +39,12 @@ VLLM_URL = "http://127.0.0.1:8000"
 SERVED_NAME = "Sohn"
 API_KEYS_FILE = Path(os.environ.get("ACTI_API_KEY_FILE", "/var/lib/acti/api-keys.txt"))
 SKILLS_DIR = Path(os.environ.get("ACTI_SKILLS_DIR", "/opt/acti/skills"))
+# Caps the number of model→tool round trips per chat turn. Same constant
+# bounds the legacy non-streaming skill loop AND the streaming agentic
+# loop. Env-var name kept for backwards compat; semantically it's "max
+# agent turns".
 MAX_SKILL_LOADS = int(os.environ.get("ACTI_MAX_SKILL_LOADS", "4"))
+AGENT_KEEPALIVE_INTERVAL_S = float(os.environ.get("ACTI_AGENT_KEEPALIVE_INTERVAL_S", "15"))
 
 # ---------- Lumen (image / video generation) configuration ----------
 # Image and video generation are delegated to the Lumen FastAPI backend
@@ -549,7 +554,7 @@ async def chat_completions(request: Request):
         body.setdefault("tool_choice", "auto")
         if stream:
             return StreamingResponse(
-                _stream_with_skill_loop(client, body, skills),
+                _agentic_stream(client, body, skills),
                 media_type="text/event-stream",
             )
         return await _run_with_skill_loop(client, body, skills)
@@ -573,189 +578,320 @@ async def chat_completions(request: Request):
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
 
-async def _stream_with_skill_loop(
-    client: httpx.AsyncClient, body: dict, skills: dict[str, dict]
-):
-    """Two-stage streaming with skill support.
+PROXY_TOOL_NAMES = frozenset({"load_skill", "generate_image", "generate_video"})
 
-    Stage 1 — non-streamed pre-flight with `enable_thinking=False` and
-        `tools=[load_skill]`. The model decides quickly whether to call a
-        skill (fast path: tool-call XML emitted in the first few tokens).
-        If it does, we read the SKILL.md body off disk and append a tool
-        result, then loop. If it doesn't, we exit stage 1 with the user's
-        original messages.
 
-    Stage 2 — streamed final response with the user's original
-        `chat_template_kwargs` (so thinking comes back if requested), no
-        tools, and the augmented messages from stage 1 if a skill loaded.
-        RadixAttention serves the prefix cache from stage 1, so stage 2's
-        prefill is essentially free.
+def _make_content_chunk(text: str) -> bytes:
+    """Build an OpenAI-shaped SSE chunk that injects assistant content text.
 
-    Why stage 1 forces thinking off: the upstream model with thinking on
-    emits a long stream of `reasoning_content` deltas before deciding
-    between content and tool_call. An SSE tap that buffers across that
-    reasoning phase causes client-side timeouts (aiohttp's
-    TransferEncodingError). Disabling thinking makes the skill-vs-content
-    decision happen in the first few output tokens; stage 2 restores
-    thinking for the user-visible answer.
-
-    Bounded by MAX_SKILL_LOADS rounds.
+    Used for synthetic chunks the proxy emits itself (status messages,
+    progress narration, error notices) — distinct from passthrough chunks
+    that come straight from the engine.
     """
-    user_ctk = dict(body.get("chat_template_kwargs") or {})
-    user_max_tokens = body.get("max_tokens")
-    proxy_tools = body.get("tools") or [LOAD_SKILL_TOOL]
+    evt = {
+        "id": "agentic-" + uuid.uuid4().hex[:12],
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": SERVED_NAME,
+        "choices": [{
+            "index": 0,
+            "delta": {"content": text},
+            "finish_reason": None,
+        }],
+    }
+    return b"data: " + json.dumps(evt).encode() + b"\n\n"
 
-    pre_body = dict(body)
-    pre_body["messages"] = list(body["messages"])
-    pre_body["stream"] = False
-    pre_body["tools"] = proxy_tools
-    pre_body.setdefault("tool_choice", "auto")
-    pre_body["chat_template_kwargs"] = {**user_ctk, "enable_thinking": False}
-    # Cap pre-flight: enough to emit a complete tool-call XML (~30 tokens)
-    # without paying for a full content reply when no tool is needed.
-    pre_body["max_tokens"] = 256
 
-    loaded_skill_blocks: list[str] = []   # skill bodies to inline into stage 2 system prompt
-    media_artifacts: list[dict] = []      # [{name, args, urls?, url?, prompt}] for stage 2 inlining
+async def _periodic_progress(queue: asyncio.Queue, label: str) -> None:
+    """Emit a small status content chunk every AGENT_KEEPALIVE_INTERVAL_S
+    seconds while a tool is running. Doubles as SSE keepalive — content
+    chunks keep the SSE connection alive AND show the user something is
+    happening.
+    """
+    elapsed = 0
+    try:
+        while True:
+            await asyncio.sleep(AGENT_KEEPALIVE_INTERVAL_S)
+            elapsed += int(AGENT_KEEPALIVE_INTERVAL_S)
+            await queue.put(_make_content_chunk(f"_…{label} ({elapsed}s)…_\n"))
+    except asyncio.CancelledError:
+        return
 
-    for _ in range(MAX_SKILL_LOADS + 1):
-        try:
-            resp = await client.post("/v1/chat/completions", json=pre_body)
-        except httpx.HTTPError as e:
-            yield (
-                b'data: {"error":{"message":"'
-                + str(e).replace('"', "'").encode()
-                + b'","type":"upstream_error"}}\n\n'
-            )
-            return
-        if resp.status_code != 200:
-            yield b"data: " + resp.content + b"\n\n"
-            yield b"data: [DONE]\n\n"
-            return
 
-        data = resp.json()
-        msg = (data.get("choices") or [{}])[0].get("message") or {}
-        tool_calls = msg.get("tool_calls") or []
-        proxy_calls = [
-            tc for tc in tool_calls
-            if (tc.get("function") or {}).get("name") in
-                {"load_skill", "generate_image", "generate_video"}
-        ]
-        if not proxy_calls:
-            break  # no tools needed — exit pre-flight
-
-        pre_body["messages"].append({
-            "role": "assistant",
-            "content": None,
-            "tool_calls": tool_calls,
-        })
-        for tc in proxy_calls:
-            fn = tc.get("function") or {}
-            tname = fn.get("name", "")
-            try:
-                args = json.loads(fn.get("arguments") or "{}")
-            except Exception:  # noqa: BLE001
-                args = {}
-
-            if tname == "load_skill":
-                sname = args.get("name", "")
-                sk = skills.get(sname)
-                if sk:
-                    content = sk["body"]
-                    loaded_skill_blocks.append(f"### Skill: {sname}\n\n{sk['body']}")
-                else:
-                    content = f"ERROR: skill '{sname}' is not in the library. Continue without."
-            elif tname in {"generate_image", "generate_video"}:
-                content, raw = await _execute_media_tool(tname, args)
-                if "error" not in raw:
-                    media_artifacts.append({"name": tname, "args": args, "result": raw})
-            else:
-                content = f"ERROR: unknown tool '{tname}'."
-
-            pre_body["messages"].append({
-                "role": "tool",
-                "tool_call_id": tc.get("id", ""),
-                "name": tname,
-                "content": content,
-            })
-
-    # Stage 2 — streamed final response. Inline any loaded skill bodies AND
-    # any generated media URLs into the system prompt rather than carrying
-    # the tool_call/tool-result round trip into the user-visible turn.
-    # Reason: with `tools=` removed, the chat template renders prior tool_calls
-    # in messages as raw XML, which the model then parrots back as content.
-    # Inlining sidesteps that entirely.
-    augmentation_blocks: list[str] = []
-    if loaded_skill_blocks:
-        augmentation_blocks.append(
-            "## Active Skill Instructions\n\n"
-            "The following skill(s) have been activated for this turn. Apply their "
-            "instructions when producing the user-visible reply.\n\n"
-            + "\n\n---\n\n".join(loaded_skill_blocks)
+async def _execute_proxy_tool(tname: str, args: dict, skills: dict) -> str:
+    """Dispatch a proxy-handled tool call to its executor. Returns the
+    string content for the tool result message.
+    """
+    if tname == "load_skill":
+        sname = args.get("name", "")
+        sk = skills.get(sname)
+        if sk:
+            return sk["body"]
+        return (
+            f"ERROR: skill '{sname}' is not in the library. "
+            f"Known: {sorted(skills.keys())}. Continue without it."
         )
-    if media_artifacts:
-        media_lines = [
-            "## Generated Media For This Reply",
-            "",
-            "You just generated the following media for the user. Embed them in your reply "
-            "exactly as instructed below. Do NOT call generate_image or generate_video again "
-            "in this turn — the user already has these results.",
-            "",
-        ]
-        for art in media_artifacts:
-            r = art["result"]
-            p = r.get("prompt", "")
-            if art["name"] == "generate_image":
-                for i, u in enumerate(r.get("urls", [])):
-                    media_lines.append(
-                        f"- Image {i+1} (prompt: {p!r}) — embed with: `![{p[:40]}]({u})`"
-                    )
-            elif art["name"] == "generate_video":
-                u = r.get("url", "")
-                media_lines.append(
-                    f"- Video (prompt: {p!r}) — embed with: "
-                    f"`<video controls src=\"{u}\"></video>`"
-                )
-        augmentation_blocks.append("\n".join(media_lines))
+    if tname in {"generate_image", "generate_video"}:
+        content, _raw = await _execute_media_tool(tname, args)
+        return content
+    return f"ERROR: unknown proxy tool '{tname}'."
 
-    if augmentation_blocks:
-        original_msgs = body["messages"]
-        sys_msg = original_msgs[0] if original_msgs and original_msgs[0].get("role") == "system" else None
-        section = "\n\n" + "\n\n".join(augmentation_blocks)
-        if sys_msg is not None:
-            new_sys = {
-                **sys_msg,
-                "content": (sys_msg.get("content", "") or "") + section,
-            }
-            stage2_messages = [new_sys] + original_msgs[1:]
-        else:
-            stage2_messages = [{"role": "system", "content": section}] + original_msgs
-    else:
-        stage2_messages = body["messages"]
 
-    final_body = dict(body)
-    final_body["messages"] = stage2_messages
-    final_body["stream"] = True
-    final_body["chat_template_kwargs"] = user_ctk  # restore original thinking setting
-    if user_max_tokens is not None:
-        final_body["max_tokens"] = user_max_tokens
-    final_body.pop("tools", None)
-    final_body.pop("tool_choice", None)
+async def _stream_one_turn(
+    client: httpx.AsyncClient, body: dict, queue: asyncio.Queue
+) -> list[dict]:
+    """Stream one engine turn into `queue`. Return any accumulated tool calls.
+
+    Wire format (OpenAI-compatible, as emitted by SGLang / vLLM):
+        data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}\\n\\n
+        data: {"choices":[{"delta":{"tool_calls":[
+            {"index":0,"id":"...","function":{"name":"...","arguments":""}}
+        ]}}]}\\n\\n
+        data: {"choices":[{"delta":{"tool_calls":[
+            {"index":0,"function":{"arguments":"par"}}
+        ]}}]}\\n\\n
+        ...
+        data: {"choices":[{"finish_reason":"tool_calls"}]}\\n\\n
+        data: [DONE]\\n\\n
+
+    Per event:
+      - `delta.tool_calls` present → accumulate by index, do NOT forward
+        (we will execute the tool in the runner; the client should not
+        see partial tool_call deltas)
+      - `delta.content` or `delta.reasoning_content` → forward verbatim
+      - `finish_reason="tool_calls"` → stop, return accumulated calls
+      - `finish_reason="stop"` (or any other) → forward, return []
+      - `[DONE]` → engine signals end; do not forward (runner emits the
+        outer DONE)
+
+    KEY GOTCHA (LiteLLM #20711, OpenAI streaming spec): only the FIRST
+    delta per tool call carries `id` and `function.name`; subsequent
+    deltas carry only `index` and partial `function.arguments`. Always
+    accumulate by `index`.
+    """
+    stream_body = dict(body)
+    stream_body["stream"] = True
+
+    tool_calls: dict[int, dict] = {}
+    finish_reason: str | None = None
 
     try:
-        async with client.stream("POST", "/v1/chat/completions", json=final_body) as resp:
+        async with client.stream(
+            "POST", "/v1/chat/completions", json=stream_body
+        ) as resp:
             if resp.status_code != 200:
-                async for chunk in resp.aiter_bytes():
-                    yield chunk
-                return
+                content = await resp.aread()
+                await queue.put(b"data: " + content + b"\n\n")
+                return []
+
+            buf = b""
             async for chunk in resp.aiter_bytes():
-                yield chunk
+                buf += chunk
+                while b"\n\n" in buf:
+                    raw_event, _, buf = buf.partition(b"\n\n")
+                    line = raw_event.strip()
+                    if not line or not line.startswith(b"data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if payload == b"[DONE]":
+                        # Engine done; runner emits outer DONE.
+                        if finish_reason is None:
+                            finish_reason = "stop"
+                        continue
+                    try:
+                        evt = json.loads(payload)
+                    except Exception:
+                        # Unparseable: forward verbatim.
+                        await queue.put(b"data: " + payload + b"\n\n")
+                        continue
+
+                    choices = evt.get("choices") or []
+                    if not choices:
+                        # Usage-only chunks, etc — forward.
+                        await queue.put(b"data: " + payload + b"\n\n")
+                        continue
+                    choice = choices[0]
+                    delta = choice.get("delta") or {}
+                    fr = choice.get("finish_reason")
+                    delta_tools = delta.get("tool_calls")
+
+                    if delta_tools:
+                        # Accumulate; do not forward the partial tool_call delta.
+                        for tcd in delta_tools:
+                            idx = tcd.get("index", 0)
+                            slot = tool_calls.setdefault(idx, {
+                                "id": "",
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            })
+                            if tcd.get("id"):
+                                slot["id"] = tcd["id"]
+                            if tcd.get("type"):
+                                slot["type"] = tcd["type"]
+                            fnd = tcd.get("function") or {}
+                            if fnd.get("name"):
+                                slot["function"]["name"] = fnd["name"]
+                            if fnd.get("arguments") is not None:
+                                slot["function"]["arguments"] += fnd["arguments"]
+                    elif (
+                        delta.get("content") is not None
+                        or delta.get("reasoning_content") is not None
+                        or "role" in delta
+                    ):
+                        # Passthrough content / reasoning / role-init chunks.
+                        await queue.put(b"data: " + payload + b"\n\n")
+                    elif fr is not None and fr != "tool_calls":
+                        # Final stop chunk — forward so client sees finish_reason.
+                        await queue.put(b"data: " + payload + b"\n\n")
+                    # else: tool_calls finish chunk, drop it
+
+                    if fr is not None:
+                        finish_reason = fr
     except httpx.HTTPError as e:
-        yield (
-            b'data: {"error":{"message":"'
-            + str(e).replace('"', "'").encode()
-            + b'","type":"upstream_error"}}\n\n'
-        )
+        err = json.dumps({"error": {"message": str(e), "type": "upstream_error"}})
+        await queue.put(b"data: " + err.encode() + b"\n\n")
+        return []
+
+    if finish_reason == "tool_calls" and tool_calls:
+        return [tool_calls[i] for i in sorted(tool_calls.keys())]
+    return []
+
+
+async def _agentic_stream(
+    client: httpx.AsyncClient, body: dict, skills: dict[str, dict]
+):
+    """Single streaming agent loop. Producer/consumer architecture:
+
+      - Background `runner` task drives the engine, executes tools, and
+        pushes SSE chunks into an asyncio.Queue.
+      - This generator (consumer) yields chunks from the queue to the
+        client.
+
+    The loop runs at most MAX_SKILL_LOADS turns. Each turn:
+      1. Stream the engine response to the client; passthrough content
+         and reasoning deltas verbatim, accumulate any tool_call deltas.
+      2. If the turn ended with a tool call, append the assistant's
+         tool_call message + execute the tool + append the tool result.
+      3. Loop. Continue until a turn ends with no tool call.
+
+    Tools (load_skill, generate_image, generate_video) stay registered
+    across all turns — never strip `tools=` mid-conversation. That was
+    the cause of the prior chat-template XML leak; with tools always
+    advertised, the chat template renders tool_call / tool messages
+    correctly.
+
+    Inspired by openai-agents-python's run_streamed pattern (background
+    task + queue + RawResponseEvent passthrough).
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def runner() -> None:
+        try:
+            for turn in range(MAX_SKILL_LOADS + 1):
+                t0 = time.time()
+                tool_calls = await _stream_one_turn(client, body, queue)
+                dt = time.time() - t0
+                if not tool_calls:
+                    print(f"[agent] turn {turn+1}: stream done in {dt:.1f}s, no tool calls", flush=True)
+                    return
+                names = ",".join(
+                    (tc.get("function") or {}).get("name", "?") for tc in tool_calls
+                )
+                print(
+                    f"[agent] turn {turn+1}: stream done in {dt:.1f}s, "
+                    f"tool_calls=[{names}]",
+                    flush=True,
+                )
+
+                # Append the assistant's tool-call message so subsequent
+                # turns see it in chat history.
+                body["messages"].append({
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": tool_calls,
+                })
+
+                for tc in tool_calls:
+                    fn = tc.get("function") or {}
+                    tname = fn.get("name", "")
+                    try:
+                        args = json.loads(fn.get("arguments") or "{}")
+                    except Exception:
+                        args = {}
+                    if tname not in PROXY_TOOL_NAMES:
+                        body["messages"].append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "name": tname,
+                            "content": f"ERROR: unknown tool '{tname}'.",
+                        })
+                        continue
+
+                    label = {
+                        "load_skill": "Loading skill",
+                        "generate_image": "Generating image",
+                        "generate_video": "Generating video — this can take 30-180s",
+                    }.get(tname, f"Calling {tname}")
+                    await queue.put(_make_content_chunk(f"\n\n_{label}…_\n\n"))
+                    progress_label = {
+                        "load_skill": "loading",
+                        "generate_image": "still generating",
+                        "generate_video": "still generating",
+                    }.get(tname, "still working")
+
+                    progress_task = asyncio.create_task(
+                        _periodic_progress(queue, progress_label)
+                    )
+                    t_tool = time.time()
+                    try:
+                        content = await _execute_proxy_tool(tname, args, skills)
+                    except Exception as e:
+                        content = f"ERROR: tool execution raised: {e}"
+                    finally:
+                        progress_task.cancel()
+                        try:
+                            await progress_task
+                        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                            pass
+                    print(
+                        f"[agent] turn {turn+1}: {tname} took "
+                        f"{time.time()-t_tool:.1f}s, result_len={len(content)}",
+                        flush=True,
+                    )
+
+                    body["messages"].append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "name": tname,
+                        "content": content,
+                    })
+            else:
+                print(f"[agent] hit MAX_SKILL_LOADS={MAX_SKILL_LOADS}", flush=True)
+                await queue.put(_make_content_chunk(
+                    "\n\n_Reached the per-turn tool-call limit. Stopping here._\n"
+                ))
+        except Exception as e:  # noqa: BLE001
+            print(f"[agent] runner unexpected error: {e}", flush=True)
+            err = json.dumps({"error": {"message": str(e), "type": "agent_error"}})
+            await queue.put(b"data: " + err.encode() + b"\n\n")
+        finally:
+            await queue.put(b"data: [DONE]\n\n")
+            await queue.put(None)  # sentinel
+
+    task = asyncio.create_task(runner())
+    try:
+        while True:
+            chunk = await queue.get()
+            if chunk is None:
+                return
+            yield chunk
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
 
 
 async def _run_with_skill_loop(
