@@ -14,6 +14,13 @@ apt-get install -y --no-install-recommends \
   python3 python3-pip \
   sqlite3
 
+# Node.js 20.x — required to build the acti-ui (forked OpenWebUI) frontend
+if ! command -v node >/dev/null || [ "$(node -v | cut -dv -f2 | cut -d. -f1)" -lt 20 ]; then
+  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  apt-get install -y nodejs
+fi
+node -v && npm -v
+
 # Verify nginx is reachable
 nginx -v
 echo "[01] system dependencies installed."

@@ -23,11 +23,15 @@ ACTi/
 ├── platform/                 # Runtime code and config
 │   ├── proxy/                # Identity-injecting OpenAI-compatible API gateway
 │   ├── system_prompts/       # Sohn's system prompt
-│   ├── ui/                   # OpenWebUI launch script + ACTi branding overlay
+│   ├── ui/                   # acti-ui launcher (the fork itself lives in vendor/)
 │   ├── status/               # Status page (HTML) + uptime collector
 │   ├── nginx/                # Reverse-proxy config (single-port public surface)
 │   ├── inference/            # Inference engine launch script
 │   └── tests/                # End-to-end SDK + agent simulation tests
+├── vendor/
+│   └── acti-ui/              # Submodule → NeelM0906/acti-ui, a soft fork of
+│                             # open-webui/open-webui with ACTi branding baked in.
+│                             # Track upstream by rebasing acti-main on new tags.
 ├── startup/
 │   ├── README.md             # Fresh-machine bootstrap guide
 │   └── *.sh                  # Numbered setup scripts (run in order on a new box)

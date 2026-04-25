@@ -12,7 +12,6 @@ sudo cp "$REPO_ROOT/platform/proxy/sohn_proxy.py"           /opt/acti/proxy/
 sudo cp "$REPO_ROOT/platform/proxy/launch_proxy.sh"         /opt/acti/proxy/
 sudo cp "$REPO_ROOT/platform/system_prompts/sohn.txt"       /opt/acti/system_prompts/
 sudo cp "$REPO_ROOT/platform/ui/launch_owui.sh"             /opt/acti/ui/
-sudo cp "$REPO_ROOT/platform/ui/owui-branding.css"          /opt/acti/ui/
 sudo cp "$REPO_ROOT/platform/inference/launch_sohn.sh"      /opt/acti/inference/
 sudo cp "$REPO_ROOT/platform/inference/launch_sglang.sh"    /opt/acti/inference/
 sudo cp "$REPO_ROOT/platform/status/status_collector.py"    /opt/acti/status/

@@ -15,12 +15,16 @@ The target machine must already have:
 ## Quickstart
 
 ```bash
-git clone https://github.com/NeelM0906/ACTi.git
+git clone --recurse-submodules https://github.com/NeelM0906/ACTi.git
 cd ACTi/startup
 cp env.example .env
 $EDITOR .env                # fill in ACTI_MODEL_ID, parsers, HF_TOKEN
 ./00_bootstrap.sh           # runs all steps in order
 ```
+
+> If you already cloned without `--recurse-submodules`, run
+> `git submodule update --init --recursive` from the repo root before bootstrapping.
+> The `vendor/acti-ui/` submodule is our forked OpenWebUI and must be present.
 
 When complete, the platform is reachable on port `8888`:
 
@@ -38,11 +42,10 @@ The orchestrator (`00_bootstrap.sh`) calls each step in order. They can also be 
 
 | Step | What it does |
 |---|---|
-| `01_install_system.sh` | apt deps: nginx, tmux, OpenMPI runtime, build tools |
+| `01_install_system.sh` | apt deps: nginx, tmux, OpenMPI runtime, build tools, Node.js 20 (for the acti-ui frontend build) |
 | `02_install_rocm.sh` | ROCm 7.2.1 userspace + dev headers; cleans up older `/opt/rocm-*` from `ldconfig` |
-| `03_install_python_env.sh` | Creates the `acti-inference` conda env, installs ROCm-built torch + the vLLM fallback engine + runtime deps |
+| `03_install_python_env.sh` | Creates the `acti-inference` conda env, installs ROCm-built torch + the vLLM fallback engine + runtime deps. Also `pip install`s `vendor/acti-ui/` (our forked OpenWebUI), which triggers `npm install` and `npm run build` for the SvelteKit frontend |
 | `03b_install_sglang.sh` | Clones the env to `acti-sglang` and builds SGLang from source against ROCm. SGLang is the default engine — set `ACTI_SKIP_SGLANG=1` if you only need the vLLM fallback |
-| `04_patch_openwebui.sh` | One-line patch to OpenWebUI's `env.py` to remove the hardcoded `(Open WebUI)` suffix from app strings |
 | `05_install_artifacts.sh` | Copies the platform code/config to `/opt/acti/`, sets up `/var/lib/acti/` and `/var/log/acti/`, installs the nginx config |
 | `06_download_model.sh` | Downloads model weights into `/var/lib/acti/hf-cache` using your `HF_TOKEN` |
 | `07_start_all.sh` | Starts the inference engine (selected by `ACTI_INFERENCE_ENGINE`, default `sglang`), Sohn API proxy, OpenWebUI, and the status collector — each in its own tmux session |

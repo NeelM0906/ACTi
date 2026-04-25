@@ -1,5 +1,6 @@
 #!/bin/bash
-# OpenWebUI wired to the Sohn proxy, branded as ACTi AI.
+# acti-ui (our forked OpenWebUI) wired to the Sohn proxy.
+# Branding lives natively in the fork at vendor/acti-ui — no env-var or CSS hacks.
 set -e
 source /opt/conda/etc/profile.d/conda.sh
 conda activate vllm-rocm
@@ -12,11 +13,10 @@ export OPENAI_API_KEYS="$OPENAI_API_KEY"
 export ENABLE_OPENAI_API=true
 export ENABLE_OLLAMA_API=false
 
-# --- Branding: ACTi AI ---
-export WEBUI_NAME="ACTi AI"
-export WEBUI_BANNERS='[{"id":"acti-welcome","type":"info","title":"Welcome to ACTi","content":"Powered by Sohn · v0.0.1","dismissible":true,"timestamp":1777000000}]'
-# Inject ACTi CSS overrides on every page
-export CUSTOM_CSS="$(cat ${ACTI_OWUI_BRANDING_CSS:-/opt/acti/ui/owui-branding.css} 2>/dev/null || echo '')"
+# --- Branding ---
+# Default app name in the fork is already "ACTi"; override here only if you
+# want a deployment-specific suffix (e.g. "ACTi (staging)").
+# export WEBUI_NAME="ACTi"
 
 # --- Auth ---
 export WEBUI_AUTH=true

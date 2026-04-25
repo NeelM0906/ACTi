@@ -1,0 +1,4 @@
+[submodule "vendor/acti-ui"]
+	path = vendor/acti-ui
+	url = https://github.com/NeelM0906/acti-ui.git
+	branch = acti-main
