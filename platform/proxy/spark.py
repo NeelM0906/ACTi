@@ -84,11 +84,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
 import uuid
 from typing import Awaitable, Callable, NamedTuple
 
 import httpx
+
+
+def _default_log(line: str) -> None:
+    """Write a log line to stdout, force-flushed.
+
+    `print()`'s default buffering swallows lines when stdout is piped
+    (e.g. tee'd to a log file by the launcher), so we always flush.
+    """
+    print(line, file=sys.stdout, flush=True)
 
 
 # ---------- types ----------
@@ -272,7 +282,7 @@ async def run_agent_stream(
     served_name: str = "agent",
     max_turns: int = 4,
     keepalive_interval_s: float = 15.0,
-    log: Callable[[str], None] = print,
+    log: Callable[[str], None] = _default_log,
 ):
     """Drive a streaming agent loop until the model produces a turn without
     any tool call (success), or `max_turns` rounds elapse (safety cap).
