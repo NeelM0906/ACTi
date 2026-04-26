@@ -66,9 +66,6 @@ start_service acti-status      "/opt/acti/status/launch_status.sh"
 # polling loop. The proxy hot-reloads the same files in-process, so adding a
 # SKILL.md propagates to BOTH the model side and the OWUI UI within seconds.
 start_service acti-skill-sync  "/opt/acti/skills/launch_skill_sync.sh"
-# Mirrors Cortex-extracted memory files into the acti-ui `memory` table so
-# users can browse them under Settings -> Memory.
-start_service acti-memory-sync "/opt/acti/memories/launch_memory_sync.sh"
 
 sleep 4
 echo

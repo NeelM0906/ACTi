@@ -29,15 +29,8 @@ sudo cp "$REPO_ROOT/platform/status/launch_status.sh"       /opt/acti/status/
 sudo rm -rf /opt/acti/skills
 sudo cp -r "$REPO_ROOT/platform/skills"                     /opt/acti/skills
 
-# Memory sync — mirrors Cortex-managed memory files into the acti-ui
-# `memory` table so Settings -> Memory shows the platform-managed memories.
-sudo mkdir -p /opt/acti/memories
-sudo cp "$REPO_ROOT/platform/memories/_sync.py"             /opt/acti/memories/
-sudo cp "$REPO_ROOT/platform/memories/launch_memory_sync.sh" /opt/acti/memories/
-
 sudo chmod +x /opt/acti/*/launch_*.sh \
-              /opt/acti/skills/launch_skill_sync.sh \
-              /opt/acti/memories/launch_memory_sync.sh
+              /opt/acti/skills/launch_skill_sync.sh
 
 # State dirs
 sudo mkdir -p /var/lib/acti /var/log/acti /var/lib/acti/openwebui \

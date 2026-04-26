@@ -6,7 +6,7 @@ A concrete walk-through of every process, port, and data flow on a live ACTi pod
 
 ## TL;DR
 
-There are **6 long-running processes** on the pod (each in its own tmux session) plus **nginx** out front. Two of them — **Spark** and **Cortex** — are *not* separate processes; they're Python modules that live *inside* the proxy. The two `*-sync` daemons are filesystem-to-OWUI mirrors and stay separate because they have nothing to do with the agent loop — they're pure ETL on a polling timer.
+There are **5 long-running processes** on the pod (each in its own tmux session) plus **nginx** out front. Two of them — **Spark** and **Cortex** — are *not* separate processes; they're Python modules that live *inside* the proxy. The one `*-sync` daemon (`skill-sync`) stays separate because it's pure filesystem-to-OWUI ETL on a polling timer — it has nothing to do with the agent loop.
 
 ```mermaid
 graph TB
@@ -18,7 +18,6 @@ graph TB
         OWUI["owui :3000<br/>OpenWebUI<br/>(SvelteKit + FastAPI)"]
         Proxy["proxy :8080<br/>gateway.py<br/>(FastAPI + Spark + Cortex)"]
         Engine["sglang :8000<br/>SGLang inference engine"]
-        MemSync["memory-sync<br/>(daemon, 10s tick)"]
         SkillSync["skill-sync<br/>(daemon, 5s tick)"]
         Status["status<br/>status_collector.py"]
     end
@@ -37,12 +36,10 @@ graph TB
     Proxy -.->|"generate_image / generate_video"| Lumen
     Proxy -.->|"recall_context"| Library
 
-    MemSync -.->|"reads"| MemFiles["/var/lib/acti/memory/users/*"]
-    MemSync -.->|"writes"| OWUIDB[("OWUI sqlite<br/>webui.db")]
     SkillSync -.->|"reads"| SkillFiles["/opt/acti/skills/*/SKILL.md"]
-    SkillSync -.->|"writes"| OWUIDB
+    SkillSync -.->|"writes"| OWUIDB[("OWUI sqlite<br/>webui.db")]
     OWUI --- OWUIDB
-    Proxy -.->|"reads/writes"| MemFiles
+    Proxy -.->|"reads/writes per-user"| MemFiles["/var/lib/acti/memory/users/*"]
     Proxy -.->|"reads"| SkillFiles
 ```
 
@@ -54,8 +51,7 @@ graph TB
 |---|---|---|---|
 | `sglang` | `127.0.0.1:8000` | SGLang inference engine. Serves the Sohn model. Holds the GPU. | `/root/sohn/launch_sglang.sh` |
 | `proxy` | `0.0.0.0:8080` | OpenAI-compatible HTTP front door. Hosts Spark (agent loop) and Cortex (memory) as in-process modules. Owns all tool dispatch (`load_skill`, `generate_image`, `generate_video`, `recall_context`). | `/root/sohn/launch_proxy.sh` |
-| `owui` | `127.0.0.1:3000` | OpenWebUI fork (`vendor/acti-ui`). Chat UI + auth + chat history DB. Forwards every chat to `127.0.0.1:8080/v1/chat/completions` with the user's identity headers. | `/root/sohn/launch_owui.sh` |
-| `memory-sync` | (no port) | Mirrors cortex memory files into OWUI's `memory` SQLite table so admins can see them in the UI. 10-second polling loop. Pure ETL — does not call the model. | `/opt/acti/memories/launch_memory_sync.sh` |
+| `owui` | `127.0.0.1:3000` | OpenWebUI fork (`vendor/acti-ui`). Chat UI + auth + chat history DB. Forwards every chat to `127.0.0.1:8080/v1/chat/completions` with the user's identity headers. OWUI's native Memory feature is intentionally disabled — Cortex is the single source of truth. | `/root/sohn/launch_owui.sh` |
 | `skill-sync` | (no port) | Mirrors `/opt/acti/skills/*/SKILL.md` into OWUI's `skill` SQLite table so admins can see/manage them in the OWUI admin panel. 5-second polling loop. Pure ETL — does not call the model. | `/opt/acti/skills/launch_skill_sync.sh` |
 | `status` | (no port) | `status_collector.py` polls all the other processes every 30s and writes `status_history.json` for the public `/status` page. | `/root/sohn/launch_status.sh` |
 
@@ -87,17 +83,19 @@ graph LR
 
 These are **import statements**, not service boundaries. `from spark import run_agent_stream` — that's the entire integration. If you `kill` the proxy, Spark and Cortex die with it because they're the same OS process.
 
-### So why ARE memory-sync and skill-sync separate?
+### So why is skill-sync separate?
 
 Three reasons:
 
-1. **Different lifecycle.** The proxy needs to handle every request with sub-second latency. The sync daemons run on a polling timer (5–10 seconds) and are happy to block on SQLite or filesystem walks. Mixing those two duty cycles in one event loop just means worse tail latency on requests.
+1. **Different lifecycle.** The proxy needs to handle every request with sub-second latency. The sync daemon runs on a polling timer (5 seconds) and is happy to block on SQLite or filesystem walks. Mixing those two duty cycles in one event loop just means worse tail latency on requests.
 
-2. **Different failure mode.** If memory-sync crashes, the proxy keeps serving — users see no impact, only the admin's "Memory" tab in OWUI gets stale. If we put memory-sync inside the proxy, a SQLite lock or schema-mismatch bug would take chat down with it.
+2. **Different failure mode.** If skill-sync crashes, the proxy keeps serving — users see no impact, only the admin panel's Skills tab in OWUI gets stale. If we put skill-sync inside the proxy, a SQLite lock or schema-mismatch bug would take chat down with it.
 
-3. **Different identity.** The sync daemons write to OWUI's database, which OWUI also writes to. They live "next to" OWUI more than next to the proxy. The fact that the source data (memory files, skill files) is also read by the proxy is a coincidence of the source-of-truth being filesystem-based.
+3. **Different identity.** The sync daemon writes to OWUI's database, which OWUI also writes to. It lives "next to" OWUI more than next to the proxy. The fact that the source files are also read by the proxy is a coincidence of the source-of-truth being filesystem-based.
 
-A useful framing: **Spark and Cortex are libraries the proxy imports**. The `*-sync` daemons are **standalone integrations** between two databases (filesystem and OWUI sqlite). They're not "under" Spark because they aren't part of the agent loop at all.
+A useful framing: **Spark and Cortex are libraries the proxy imports**. `skill-sync` is a **standalone integration** between two stores (the filesystem and OWUI's sqlite). It's not "under" Spark because it isn't part of the agent loop at all.
+
+> Historical note: there used to be a sibling `memory-sync` daemon that mirrored cortex memory files into OWUI's `memory` SQLite table. It was retired when Cortex moved to per-user partitioning — Cortex injects memories directly into the system prompt now, so there's no need for a parallel OWUI-side copy, and OWUI's native Memory tab is disabled to keep the data model unambiguous.
 
 ---
 
@@ -150,28 +148,23 @@ The two big branches here are the **auxiliary path** (OWUI's title/tag/follow-up
 
 ## Memory data flow
 
-This is the part the recent fix changed the most. Before per-user partitioning, the leftmost box was a single global directory whose contents were injected into every user's chat.
+Cortex is the only memory layer. There is no OWUI-side mirror — Cortex reads and writes directly to the per-user filesystem partition, and injects memories into the system prompt at request time.
 
 ```mermaid
 graph LR
-    subgraph "Source of truth: filesystem"
+    subgraph "Source of truth: filesystem (per-user partitions)"
         UA["/var/lib/acti/memory/users/&lt;user-uuid-A&gt;/<br/>MEMORY.md<br/>user_signup_name.md<br/>... extracted memories"]
         UB["/var/lib/acti/memory/users/&lt;user-uuid-B&gt;/<br/>MEMORY.md<br/>..."]
     end
 
-    subgraph "Live request"
+    subgraph "Live request (per-turn, in proxy)"
         Req["chat completion<br/>X-OpenWebUI-User-Id: &lt;A&gt;"]
         Cortex["cortex.inject_memories<br/>(reads only A's dir)"]
         Sys["system prompt with<br/>A's memories"]
     end
 
-    subgraph "Background extractor"
-        Extract["cortex.extract_memories<br/>(after every turn,<br/>fire-and-forget)"]
-    end
-
-    subgraph "OWUI mirror (admin UI only)"
-        Sync["memory-sync daemon"]
-        Tab["OWUI Memory tab<br/>(admin view)"]
+    subgraph "Background extractor (after each turn, in proxy)"
+        Extract["cortex.extract_memories<br/>(fire-and-forget)"]
     end
 
     Req --> Cortex
@@ -179,15 +172,12 @@ graph LR
     Cortex --> Sys
     Sys -.->|"after turn"| Extract
     Extract -->|"writes"| UA
-
-    UA -.->|"polled every 10s"| Sync
-    UB -.->|"polled every 10s"| Sync
-    Sync -->|"upsert / delete"| Tab
 ```
 
-Two key invariants:
+Three key invariants:
 - **Cortex never reads another user's directory.** Partitioning is by sanitized `X-OpenWebUI-User-Id`. There's no code path that crosses partitions.
-- **Filesystem is canonical.** OWUI's memory table is a downstream view that the daemon rebuilds from the filesystem. Deleting a memory file → daemon notices → row is deleted from OWUI. The proxy never reads from OWUI's memory table.
+- **Filesystem is canonical.** Memories are markdown files; nothing else is authoritative.
+- **OWUI is not in the memory loop.** `ENABLE_MEMORIES=false` and `USER_PERMISSIONS_FEATURES_MEMORIES=false` are exported in `launch_owui.sh` so the OWUI Memory API endpoints return 404 and the user-settings toggle is hidden. Two memory systems was the old confusion — there's now exactly one.
 
 ---
 
@@ -233,7 +223,6 @@ Both bearer tokens stay server-side (`/etc/acti/media.env`, `/etc/acti/library.e
 | Per-user memories | `/var/lib/acti/memory/users/<uuid>/*.md` | Cortex (proxy) |
 | Skills | `/opt/acti/skills/<name>/SKILL.md` | filesystem; loaded by proxy |
 | OWUI users, chats, tags | `/var/lib/acti/openwebui/webui.db` | OWUI |
-| OWUI memory mirror | same DB, `memory` table | written by `memory-sync`, read by OWUI |
 | OWUI skill mirror | same DB, `skill` table | written by `skill-sync`, read by OWUI |
 | Vector embeddings (Chroma) | `/var/lib/acti/openwebui/vector_db/chroma.sqlite3` | OWUI (currently empty — no RAG configured) |
 | API keys | `/root/sohn/api-keys.txt` | proxy |
@@ -243,15 +232,13 @@ Both bearer tokens stay server-side (`/etc/acti/media.env`, `/etc/acti/library.e
 
 ---
 
-## What's redundant after the per-user partition fix
+## Notes for operators
 
-A handful of things are now load-bearing on a model that no longer applies. Worth a cleanup pass at some point:
+1. **The `_anonymous` partition** is shared across all direct API users without an OWUI session (no `X-OpenWebUI-User-Id` header and no `body["user"]`). Acceptable for operator API keys; do not point human users at `/v1/*` without authenticating through OWUI.
 
-1. **`memory-sync`** is currently mirroring nothing useful. Its target — OWUI's per-user `memory` table — is filtered by user_id, but with cortex now writing per-user files under `users/<id>/`, the daemon's flat `glob('*.md')` walk only finds files at the root, which is now empty by design. The daemon idles harmlessly. Fix is either (a) update the daemon to walk per-user dirs and assign each row to the matching user, or (b) retire the daemon entirely since OWUI's memory feature is no longer the canonical view.
+2. **Cortex memory format.** A memory file is markdown with YAML-ish front matter (`name`, `description`, `type` ∈ `user|feedback|project|reference`). The `MEMORY.md` index is a flat list of one-liners — that's what the model actually sees in the prompt. The full body of each file is only read when the user explicitly recalls it.
 
-2. **OWUI's native memory feature** (the "Memory" tab in user settings) is duplicate functionality — the cortex pipeline already injects memories on every request. Recommend: keep OWUI memory disabled in user settings, since cortex is authoritative.
-
-3. **The `_anonymous` partition** is shared across all direct API users without an OWUI session. Acceptable for operator API keys but worth flagging in operational docs.
+3. **Engine identity.** SGLang serves the model as `Sohn`. The base-model identity is intentionally not in the prompt, the API, or any platform artifact — operators who need to upgrade the engine should consult the platform team rather than reading model strings out of process listings.
 
 ---
 

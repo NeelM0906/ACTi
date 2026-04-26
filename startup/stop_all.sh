@@ -1,7 +1,7 @@
 #!/bin/bash
 # Stop all ACTi tmux services. Does not touch nginx or saved data.
 set +e
-for s in acti-inference acti-proxy acti-ui acti-status acti-skill-sync acti-memory-sync; do
+for s in acti-inference acti-proxy acti-ui acti-status acti-skill-sync; do
   if tmux has-session -t "$s" 2>/dev/null; then
     tmux kill-session -t "$s"
     echo "  stopped: $s"

@@ -29,6 +29,19 @@ export DEFAULT_MODELS="Sohn"
 # name from their first turn. MUST stay on for memory isolation to work.
 export ENABLE_FORWARD_USER_INFO_HEADERS=true
 
+# Disable OWUI's native Memory feature. Cortex (in-process inside the proxy)
+# is the authoritative memory layer — it injects per-user memories into every
+# chat request, manages extraction/compaction, and is partitioned by
+# X-OpenWebUI-User-Id. OWUI's Memory tab would be a parallel/competing
+# system that isn't actually wired into the model prompt, so leaving it on
+# just confuses operators and users.
+#
+# - ENABLE_MEMORIES=false: kills the /api/v1/memories/* endpoints (404)
+# - USER_PERMISSIONS_FEATURES_MEMORIES=false: removes the toggle from
+#   Settings -> Personalization, so non-admin users don't see the option
+export ENABLE_MEMORIES=false
+export USER_PERMISSIONS_FEATURES_MEMORIES=false
+
 # Override OWUI's default chat-title prompt. The default ships with
 # "Generate a concise, 3-5 word title with an emoji ..." — Sohn's branding
 # is no-emoji, so we strip that clause. The proxy adds a defense-in-depth
