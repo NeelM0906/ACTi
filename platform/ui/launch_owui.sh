@@ -22,6 +22,12 @@ export ENABLE_OLLAMA_API=false
 # --- Auth ---
 export WEBUI_AUTH=true
 export DEFAULT_MODELS="Sohn"
+# Forward signed-in user identity to the upstream (Sohn proxy) as request
+# headers — the proxy uses X-OpenWebUI-User-Id to partition cortex memory
+# per user (preventing cross-account identity leaks) and X-OpenWebUI-User-Name
+# to seed the user's signup-collected name so the model can address them by
+# name from their first turn. MUST stay on for memory isolation to work.
+export ENABLE_FORWARD_USER_INFO_HEADERS=true
 # DEFAULT_USER_ROLE intentionally NOT set so the first signup becomes admin.
 # Future signups default to "pending" via the admin panel after first admin exists.
 # Admins see ALL resources regardless of access grants — without this, OWUI 0.9.2

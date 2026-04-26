@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import cortex
-from gateway import _quarantine_legacy_memory
+from gateway import _purge_legacy_global_memory, _resolve_user_identity
 
 
 def _write_memory_file(d: Path, name: str, body: str = "user's name is X") -> None:
@@ -129,7 +129,7 @@ def test_has_any_memory_and_onboarding_flag() -> None:
         shutil.rmtree(base)
 
 
-def test_legacy_quarantine() -> None:
+def test_legacy_purge() -> None:
     base = Path(tempfile.mkdtemp())
     try:
         # Simulate legacy global memory: *.md files at the root of memory_dir.
@@ -144,28 +144,90 @@ def test_legacy_quarantine() -> None:
         d_user.mkdir(parents=True)
         (d_user / "user_name.md").write_text("---\ntype: user\n---\nAlex\n")
 
-        moved = _quarantine_legacy_memory(base)
-        assert moved == 2, f"expected 2 files moved, got {moved}"
+        deleted = _purge_legacy_global_memory(base)
+        assert deleted == 2, f"expected 2 files deleted, got {deleted}"
 
         # Root is now clean.
-        root_md = list(p for p in base.iterdir() if p.is_file() and p.suffix == ".md")
+        root_md = [p for p in base.iterdir() if p.is_file() and p.suffix == ".md"]
         assert root_md == [], f"root still has md files: {root_md}"
 
         # Per-user partition untouched.
         assert (d_user / "user_name.md").exists(), (
-            "per-user partition was incorrectly quarantined"
+            "per-user partition was incorrectly deleted"
         )
 
-        # Quarantine dir now contains the legacy files.
-        q_files = list((base / "_legacy_quarantine").rglob("*.md"))
-        assert len(q_files) == 2, f"quarantined files missing: {q_files}"
-
-        # Idempotent: second call moves nothing.
-        moved2 = _quarantine_legacy_memory(base)
-        assert moved2 == 0, "quarantine must be idempotent"
-        print("  PASS: legacy global memory quarantined; per-user dirs preserved")
+        # Idempotent: second call deletes nothing.
+        deleted2 = _purge_legacy_global_memory(base)
+        assert deleted2 == 0, "purge must be idempotent"
+        print("  PASS: legacy global memory deleted; per-user dirs preserved")
     finally:
         shutil.rmtree(base)
+
+
+def test_seed_signup_name() -> None:
+    base = Path(tempfile.mkdtemp())
+    try:
+        d = cortex.user_memory_dir(base, "fresh-aiko")
+
+        wrote = cortex.seed_signup_name(d, "Samantha Aiko")
+        assert wrote, "first seed call should write"
+        assert (d / cortex.SIGNUP_NAME_MEMORY_FILENAME).exists()
+        index = (d / "MEMORY.md").read_text()
+        assert cortex.SIGNUP_NAME_MEMORY_FILENAME in index, "index pointer missing"
+
+        # has_any_memory now flips to True, so the gateway will skip onboarding.
+        assert cortex.has_any_memory(d), "seeded user must register has_any_memory"
+
+        msgs = [{"role": "system", "content": "base"}]
+        out = cortex.inject_memories(msgs, d, include_onboarding=False)
+        sys_text = out[0]["content"]
+        assert "Samantha Aiko" in sys_text, "seeded name must surface in injected prompt"
+
+        # Idempotent: re-seeding the same name is a no-op.
+        wrote2 = cortex.seed_signup_name(d, "Samantha Aiko")
+        assert not wrote2, "re-seed of same name should be a no-op"
+
+        # Empty / whitespace name is rejected.
+        assert cortex.seed_signup_name(d, "  ") is False
+        print("  PASS: signup name seeding writes once, surfaces in prompt, is idempotent")
+    finally:
+        shutil.rmtree(base)
+
+
+class _FakeRequest:
+    """Minimal stand-in for FastAPI Request used by _resolve_user_identity."""
+    def __init__(self, headers: dict[str, str]):
+        self.headers = {k.lower(): v for k, v in headers.items()}
+
+
+def test_resolve_user_identity_priority() -> None:
+    # 1. Header wins over body.user.
+    req = _FakeRequest({
+        "X-OpenWebUI-User-Id": "uuid-aiko",
+        "X-OpenWebUI-User-Name": "Samantha%20Aiko",
+    })
+    body = {"user": "different-id-from-body"}
+    uid, uname = _resolve_user_identity(req, body)
+    assert uid == "uuid-aiko", f"header must win, got {uid}"
+    assert uname == "Samantha Aiko", f"name must be url-decoded, got {uname!r}"
+
+    # 2. Falls back to body.user when no header.
+    req2 = _FakeRequest({})
+    body2 = {"user": "raw-api-user"}
+    uid2, uname2 = _resolve_user_identity(req2, body2)
+    assert uid2 == "raw-api-user"
+    assert uname2 is None
+
+    # 3. Empty header treated as absent.
+    req3 = _FakeRequest({"X-OpenWebUI-User-Id": "  ", "X-OpenWebUI-User-Name": ""})
+    uid3, uname3 = _resolve_user_identity(req3, {"user": "fallback"})
+    assert uid3 == "fallback"
+    assert uname3 is None
+
+    # 4. Anonymous: nothing anywhere.
+    uid4, uname4 = _resolve_user_identity(_FakeRequest({}), {})
+    assert uid4 is None and uname4 is None
+    print("  PASS: identity resolution prefers OWUI headers, falls back cleanly")
 
 
 if __name__ == "__main__":
@@ -174,5 +236,7 @@ if __name__ == "__main__":
     test_no_cross_user_injection()
     test_sanitize_user_id_traversal_safe()
     test_has_any_memory_and_onboarding_flag()
-    test_legacy_quarantine()
+    test_legacy_purge()
+    test_seed_signup_name()
+    test_resolve_user_identity_priority()
     print("\nAll tests passed.")

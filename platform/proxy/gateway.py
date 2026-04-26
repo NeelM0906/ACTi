@@ -28,6 +28,7 @@ import json
 import os
 import sys
 import time
+import urllib.parse
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -204,6 +205,49 @@ def _make_load_tool_handler(body: dict, allowed: dict[str, dict]):
     return _handle
 
 
+# ---------- user identity resolution ----------
+#
+# OWUI forwards the signed-in user's id and full name to the upstream chat
+# completion endpoint via HTTP headers when ENABLE_FORWARD_USER_INFO_HEADERS=true.
+# We use these to partition cortex memory per user and to seed the user's name
+# (collected at signup) so the model addresses them properly from message 1.
+#
+# Header names match OWUI's defaults. They can be overridden in OWUI's env;
+# we keep the defaults here. A header set to an empty string is treated as
+# absent.
+
+OWUI_USER_ID_HEADER = "x-openwebui-user-id"
+OWUI_USER_NAME_HEADER = "x-openwebui-user-name"
+
+
+def _resolve_user_identity(request: Request, body: dict) -> tuple[str | None, str | None]:
+    """Return (user_id, user_name) for this request.
+
+    Priority for user_id: OWUI header, then body["user"], else None.
+    user_name comes from the OWUI header only (URL-decoded). Either may be
+    None — the caller decides how to handle that (anonymous partition,
+    onboarding block, etc.).
+    """
+    headers = request.headers
+    user_id = (headers.get(OWUI_USER_ID_HEADER) or "").strip() or None
+    if not user_id:
+        body_user = body.get("user")
+        if isinstance(body_user, str) and body_user.strip():
+            user_id = body_user.strip()
+
+    user_name: str | None = None
+    raw_name = headers.get(OWUI_USER_NAME_HEADER)
+    if raw_name:
+        try:
+            decoded = urllib.parse.unquote(raw_name).strip()
+        except Exception:
+            decoded = raw_name.strip()
+        if decoded:
+            user_name = decoded
+
+    return user_id, user_name
+
+
 # ---------- auxiliary-call detection ----------
 #
 # OWUI sends several "internal" /v1/chat/completions calls that aren't real
@@ -233,30 +277,27 @@ def _is_auxiliary_call(body: dict) -> bool:
 
 # ---------- app lifespan ----------
 
-def _quarantine_legacy_memory(memory_dir: Path) -> int:
-    """Move any *.md files at the root of memory_dir into a quarantine
-    subfolder. These are pre-partitioning global memories that would have
-    been visible to every user — moving them out fixes the cross-user leak.
+def _purge_legacy_global_memory(memory_dir: Path) -> int:
+    """Delete *.md files at the root of memory_dir.
 
-    Returns the number of files quarantined. Idempotent: a clean dir is a
-    no-op. Files in subdirectories (per-user partitions) are untouched.
+    These are pre-partitioning global memories that were visible to every
+    user (the cross-account leak). Per-user partitioning makes them
+    functionally orphaned — we can't attribute any of them to a single
+    user, and the new inject path can no longer reach them anyway, so
+    deleting is the correct action. Files inside `users/` subdirectories
+    are not touched. Idempotent: a clean dir is a no-op.
     """
     if not memory_dir.exists():
         return 0
     legacy = [p for p in memory_dir.iterdir() if p.is_file() and p.suffix == ".md"]
-    if not legacy:
-        return 0
-    ts = time.strftime("%Y%m%d-%H%M%S")
-    dest = memory_dir / "_legacy_quarantine" / ts
-    dest.mkdir(parents=True, exist_ok=True)
-    moved = 0
+    deleted = 0
     for p in legacy:
         try:
-            p.rename(dest / p.name)
-            moved += 1
+            p.unlink()
+            deleted += 1
         except OSError as e:
-            _log(f"[gateway] failed to quarantine legacy memory {p.name}: {e}")
-    return moved
+            _log(f"[gateway] failed to delete legacy memory {p.name}: {e}")
+    return deleted
 
 
 @asynccontextmanager
@@ -270,13 +311,12 @@ async def lifespan(app: FastAPI):
     app.state.skills_manifest = skills.skills_manifest_block(app.state.skills)
     app.state.skills_mtime = skills.skills_dir_mtime()
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    quarantined = _quarantine_legacy_memory(MEMORY_DIR)
-    if quarantined:
+    deleted = _purge_legacy_global_memory(MEMORY_DIR)
+    if deleted:
         _log(
-            f"[gateway] WARNING: quarantined {quarantined} legacy global memory "
-            f"file(s) — these were previously visible to all users. Per-user "
-            f"partitioning is now active. Review {MEMORY_DIR}/_legacy_quarantine/ "
-            f"before deletion."
+            f"[gateway] WARNING: deleted {deleted} legacy global memory file(s). "
+            f"These were pre-partitioning artifacts visible to ALL users. "
+            f"Per-user partitioning is now active."
         )
     user_root = MEMORY_DIR / "users"
     n_users = len([p for p in user_root.glob("*") if p.is_dir()]) if user_root.exists() else 0
@@ -442,18 +482,27 @@ async def chat_completions(request: Request):
         skills_manifest=request.app.state.skills_manifest if use_skills else "",
     )
 
-    # Cortex: per-user memory partitioning. body["user"] is the OpenAI-standard
-    # end-user identifier; OWUI sets it to the signed-in user's id. Without
-    # partitioning by it, one user's saved memories (e.g. their name) leak into
-    # every other user's system prompt.
-    raw_user_id = body.get("user") if isinstance(body.get("user"), str) else None
+    # Cortex: per-user memory partitioning. Identity resolution prefers the
+    # OWUI-forwarded headers (X-OpenWebUI-User-Id / X-OpenWebUI-User-Name),
+    # which OWUI sets when ENABLE_FORWARD_USER_INFO_HEADERS=true is exported
+    # in launch_owui.sh. Without those, falls back to body["user"] (OpenAI-
+    # standard) and finally to a shared _anonymous partition.
+    raw_user_id, raw_user_name = _resolve_user_identity(request, body)
     user_mem_dir = cortex.user_memory_dir(MEMORY_DIR, raw_user_id)
-    # First-interaction onboarding: when this user has zero memory files, ask
-    # the model to introduce itself and request the user's full name. Auto-
-    # cleared as soon as any memory is saved by the extractor.
     is_first_interaction = not cortex.has_any_memory(user_mem_dir)
+
+    # When the OWUI signup form supplied a full name and this is a fresh user,
+    # seed it directly as a user memory. The model will see "User's full name
+    # is X" via inject_memories on this very turn — no onboarding back-and-forth
+    # needed. If no name was forwarded, fall back to the model-driven onboarding
+    # block so it asks the user explicitly.
+    name_seeded = False
+    if is_first_interaction and raw_user_name:
+        name_seeded = cortex.seed_signup_name(user_mem_dir, raw_user_name)
+    include_onboarding = is_first_interaction and not name_seeded
+
     body["messages"] = cortex.inject_memories(
-        body["messages"], user_mem_dir, include_onboarding=is_first_interaction,
+        body["messages"], user_mem_dir, include_onboarding=include_onboarding,
     )
     # Don't forward the OWUI user id to the engine — it's a routing/storage
     # identifier, not part of the chat itself.
@@ -461,10 +510,11 @@ async def chat_completions(request: Request):
     if raw_user_id:
         _log(
             f"[gateway] user partition: {cortex.sanitize_user_id(raw_user_id)} "
-            f"(onboarding={'YES' if is_first_interaction else 'no'})"
+            f"(name={'seeded' if name_seeded else ('forwarded' if raw_user_name else 'unknown')}, "
+            f"onboarding={'YES' if include_onboarding else 'no'})"
         )
     else:
-        _log("[gateway] no body.user — using shared _anonymous partition")
+        _log("[gateway] no user identifier in headers/body — using shared _anonymous partition")
 
     client: httpx.AsyncClient = request.app.state.client
 

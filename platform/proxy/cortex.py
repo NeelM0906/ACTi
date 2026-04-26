@@ -380,6 +380,79 @@ def has_any_memory(memory_dir: Path) -> bool:
     return False
 
 
+# Stable filename for the signup-supplied name. Fixed so re-seeding is
+# idempotent (overwrites in place instead of producing duplicates).
+SIGNUP_NAME_MEMORY_FILENAME = "user_signup_name.md"
+
+
+def _signup_name_body(full_name: str) -> str:
+    return (
+        "---\n"
+        "name: User name\n"
+        "description: Full name provided at signup\n"
+        "type: user\n"
+        "---\n"
+        f"The user's full name is {full_name}. Address them by their first "
+        f"name in casual conversation, by their full name in formal contexts. "
+        f"Do not invent, infer, or assume any other name for this user.\n"
+    )
+
+
+def seed_signup_name(memory_dir: Path, full_name: str) -> bool:
+    """Write the signup-provided full name as a user memory + index entry.
+
+    Idempotent: rewrites only when content has changed. Returns True when a
+    write actually occurred. Used by the gateway when an OWUI client forwards
+    `X-OpenWebUI-User-Name`, so the model addresses the user by name from
+    their first message instead of running an onboarding turn.
+    """
+    full_name = (full_name or "").strip()
+    if not full_name:
+        return False
+
+    target = memory_dir / SIGNUP_NAME_MEMORY_FILENAME
+    body = _signup_name_body(full_name)
+    if target.exists():
+        try:
+            if target.read_text() == body:
+                return False
+        except OSError:
+            pass
+    try:
+        _atomic_write(target, body)
+    except OSError:
+        return False
+
+    # Update the index. The model reads MEMORY.md (the index), not the
+    # individual memory files, so the actual name has to live on the hook
+    # line itself for it to be visible from message 1.
+    index_path = _index_path(memory_dir)
+    index_line = (
+        f"- [User name]({SIGNUP_NAME_MEMORY_FILENAME}) — "
+        f"the user's full name is {full_name} (provided at signup)"
+    )
+    existing = ""
+    if index_path.exists():
+        try:
+            existing = index_path.read_text()
+        except OSError:
+            existing = ""
+
+    # Drop any prior line pointing at the same file so a renamed user
+    # doesn't keep stale entries — then append the fresh hook.
+    new_lines: list[str] = []
+    for line in existing.splitlines():
+        if SIGNUP_NAME_MEMORY_FILENAME in line:
+            continue
+        new_lines.append(line)
+    new_lines.append(index_line)
+    try:
+        _atomic_write(index_path, "\n".join(new_lines).rstrip() + "\n")
+    except OSError:
+        pass
+    return True
+
+
 # ---------- memory injection ----------
 
 _ONBOARDING_BLOCK = (
