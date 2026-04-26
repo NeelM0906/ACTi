@@ -82,6 +82,12 @@ export BYPASS_MODEL_ACCESS_CONTROL=true
 # `frontend/static/` and we want the FastAPI /static mount to serve from
 # there so the sidebar + avatars don't render as broken images.
 export STATIC_DIR=/opt/conda/envs/vllm-rocm/lib/python3.12/site-packages/open_webui/frontend
+# SPA mount — OWUI's main.py checks `FRONTEND_BUILD_DIR` and only mounts
+# the SvelteKit SPA at `/` if that path exists. The default points at
+# open_webui/build which does NOT exist in our install (the build lives
+# under /frontend). Without this export every page in the chat UI 404s
+# even though /api/* works fine.
+export FRONTEND_BUILD_DIR=/opt/conda/envs/vllm-rocm/lib/python3.12/site-packages/open_webui/frontend
 
 # --- Data ---
 export DATA_DIR="${ACTI_OWUI_DATA_DIR:-/var/lib/acti/openwebui}"
