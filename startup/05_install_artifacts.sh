@@ -54,6 +54,33 @@ sudo cp "$REPO_ROOT/platform/status/status.html" /usr/share/nginx/html/acti-stat
   echo "{\"points\":[],\"updated\":0}" | sudo tee /usr/share/nginx/html/acti-status/status_history.json >/dev/null
 sudo chown -R www-data:www-data /usr/share/nginx/html/acti-status
 
+# Default-model trigger: every new chat-UI user gets Sohn pre-selected as
+# their default model. We set the trigger ON the user table so it fires
+# regardless of whether the user is created via the signup form or via
+# the helper script we use for ops-managed accounts.
+ACTI_OWUI_DB="${ACTI_OWUI_DB:-/var/lib/acti/openwebui/webui.db}"
+if [ -f "$ACTI_OWUI_DB" ]; then
+  sudo sqlite3 "$ACTI_OWUI_DB" <<'EOSQL'
+DROP TRIGGER IF EXISTS acti_default_user_model;
+CREATE TRIGGER acti_default_user_model
+AFTER INSERT ON user
+WHEN NEW.settings IS NULL OR json_extract(NEW.settings, '$.ui.models') IS NULL
+BEGIN
+  UPDATE user
+  SET settings = json_set(
+        COALESCE(NEW.settings, json_object()),
+        '$.ui',
+        json_set(
+          COALESCE(json_extract(NEW.settings, '$.ui'), json_object()),
+          '$.models', json_array('Sohn')
+        )
+      )
+  WHERE id = NEW.id;
+END;
+EOSQL
+  echo "  acti_default_user_model trigger installed in $ACTI_OWUI_DB"
+fi
+
 # nginx config
 sudo cp "$REPO_ROOT/platform/nginx/nginx.conf" /etc/nginx/nginx.conf
 sudo nginx -t
