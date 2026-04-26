@@ -8,7 +8,9 @@ set -o pipefail
 ACTI_SKILLS_DIR="${ACTI_SKILLS_DIR:-/opt/acti/skills}"
 ACTI_LOG_DIR="${ACTI_LOG_DIR:-/var/log/acti}"
 ACTI_SKILL_SYNC_INTERVAL="${ACTI_SKILL_SYNC_INTERVAL:-5}"
-OWUI_DB="${OWUI_DB:-/root/open-webui-data/webui.db}"
+# Default DB path matches the OWUI launcher's DATA_DIR
+# (platform/ui/launch_owui.sh sets DATA_DIR=/var/lib/acti/openwebui).
+OWUI_DB="${OWUI_DB:-/var/lib/acti/openwebui/webui.db}"
 
 mkdir -p "$ACTI_LOG_DIR"
 LOG="$ACTI_LOG_DIR/skill-sync.log"
