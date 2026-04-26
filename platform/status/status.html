@@ -122,8 +122,21 @@
 
   <div class="services">
     <h2>Service health</h2>
-    <div class="svc"><span class="dot" id="d-sohn"></span><span class="name">Sohn</span><span class="state" id="s-sohn">—</span></div>
-    <div class="svc"><span class="dot" id="d-platform"></span><span class="name">ACTi Platform</span><span class="state" id="s-platform">—</span></div>
+    <div class="svc"><span class="dot" id="d-engine"></span><span class="name">Inference engine <small style="color:var(--muted)">SGLang · :8000</small></span><span class="state" id="s-engine">—</span></div>
+    <div class="svc"><span class="dot" id="d-api"></span><span class="name">Sohn API <small style="color:var(--muted)">proxy · gateway.py · :8080</small></span><span class="state" id="s-api">—</span></div>
+    <div class="svc"><span class="dot" id="d-ui"></span><span class="name">Chat UI <small style="color:var(--muted)">OpenWebUI · :3000</small></span><span class="state" id="s-ui">—</span></div>
+    <div class="svc"><span class="dot" id="d-skills"></span><span class="name">Skill sync <small style="color:var(--muted)">filesystem ↔ OWUI mirror</small></span><span class="state" id="s-skills">—</span></div>
+    <div class="svc"><span class="dot" id="d-collector"></span><span class="name">Status collector <small style="color:var(--muted)">24h uptime probe</small></span><span class="state" id="s-collector">—</span></div>
+  </div>
+
+  <div class="services" id="config-panel">
+    <h2>Platform configuration</h2>
+    <div class="svc"><span class="dot ok"></span><span class="name">Per-user memory isolation</span><span class="state">Active</span></div>
+    <div class="svc"><span class="dot ok"></span><span class="name">Cortex memory <small style="color:var(--muted)">authoritative · per-user partitions: <span id="cfg-partitions">—</span></small></span><span class="state">Active</span></div>
+    <div class="svc"><span class="dot ok"></span><span class="name">OWUI native memory</span><span class="state">Disabled</span></div>
+    <div class="svc"><span class="dot ok"></span><span class="name">Identity header forwarding <small style="color:var(--muted)">X-OpenWebUI-User-Id / -Name</small></span><span class="state">Active</span></div>
+    <div class="svc"><span class="dot" id="d-media"></span><span class="name">Media (image / video)</span><span class="state" id="s-media">—</span></div>
+    <div class="svc"><span class="dot" id="d-library"></span><span class="name">Library (recall_context)</span><span class="state" id="s-library">—</span></div>
   </div>
 
   <div class="history">
@@ -134,7 +147,7 @@
 
   <footer>
     auto-refresh every 10s · last update: <span id="last-upd">—</span>
-    &nbsp;·&nbsp;<span class="version">ACTi v0.0.1</span>
+    &nbsp;·&nbsp;<span class="version">ACTi v0.1.0 · cortex per-user partitioning</span>
   </footer>
 </div>
 
@@ -154,62 +167,94 @@ function setDot(id, status) {
   el.classList.add(status === "ok" ? "ok" : status === "warn" ? "warn" : "bad");
 }
 
+function setSvc(dotId, stateId, ok, okLabel, badLabel) {
+  setDot(dotId, ok ? "ok" : "bad");
+  document.getElementById(stateId).textContent = ok ? (okLabel || "Operational") : (badLabel || "Unavailable");
+}
+
 async function tick() {
-  // Sohn = LLM stack (proxy + engine, both must be up)
-  // ACTi Platform = the chat UI
-  const [sohn, platform] = await Promise.all([
-    probe("/sohn-health"),
-    probe("/api/config"),
+  // Probe the proxy (with detail), the chat UI, and the collector's history.
+  const [healthR, uiR, histR] = await Promise.all([
+    fetch("/sohn-health?detail=1", { cache: "no-store" }).catch(() => null),
+    fetch("/api/config", { cache: "no-store" }).catch(() => null),
+    fetch("/status/history.json", { cache: "no-store" }).catch(() => null),
   ]);
 
-  // Sohn proxy /sohn-health embeds engine status — both must be healthy
-  let sohnReady = false;
-  if (sohn.ok) {
+  // ---- Proxy + engine (one rich call) ----
+  let health = null, apiOk = false, engineOk = false, detail = null;
+  if (healthR && healthR.ok) {
+    apiOk = true;
+    try { health = await healthR.json(); } catch {}
+    if (health) {
+      engineOk = (health.status === "ok");
+      detail = health.detail || null;
+    }
+  }
+  setSvc("d-engine", "s-engine", engineOk);
+  setSvc("d-api",    "s-api",    apiOk);
+
+  // ---- Chat UI ----
+  const uiOk = !!(uiR && uiR.ok);
+  setSvc("d-ui", "s-ui", uiOk);
+
+  // ---- Skill sync — proxy reports skills_loaded; >0 means the daemon is keeping the catalog populated ----
+  const skillsLoaded = detail ? (detail.skills_loaded || 0) : 0;
+  setSvc("d-skills", "s-skills", skillsLoaded > 0,
+         skillsLoaded > 0 ? `${skillsLoaded} loaded` : "No skills",
+         "No skills");
+
+  // ---- Status collector — fresh history file means it's writing ----
+  let collectorOk = false;
+  let history = null;
+  if (histR && histR.ok) {
     try {
-      const r = await fetch("/sohn-health", { cache: "no-store" });
-      const j = await r.json();
-      sohnReady = j.status === "ok";
+      history = await histR.json();
+      const ageMs = Date.now() - (history.updated || 0);
+      collectorOk = ageMs < 5 * 60 * 1000; // fresh within 5 minutes
     } catch {}
   }
+  setSvc("d-collector", "s-collector", collectorOk);
 
-  setDot("d-sohn", sohnReady ? "ok" : "bad");
-  document.getElementById("s-sohn").textContent = sohnReady ? "Operational" : "Unavailable";
+  // ---- Configuration panel: optional integrations from detail ----
+  document.getElementById("cfg-partitions").textContent = detail ? detail.memory_partitions : "—";
+  if (detail) {
+    setDot("d-media", detail.media_enabled ? "ok" : "warn");
+    document.getElementById("s-media").textContent = detail.media_enabled ? "Active" : "Disabled";
+    setDot("d-library", detail.library_enabled ? "ok" : "warn");
+    document.getElementById("s-library").textContent = detail.library_enabled ? "Active" : "Disabled";
+  }
 
-  setDot("d-platform", platform.ok ? "ok" : "bad");
-  document.getElementById("s-platform").textContent = platform.ok ? "Operational" : "Unavailable";
-
-  // Composite banner
-  const allOk = sohnReady && platform.ok;
+  // ---- Composite banner ----
+  const coreOk = engineOk && apiOk && uiOk;
   const banner = document.getElementById("banner");
   banner.classList.remove("ok", "warn", "down");
-  if (allOk) {
+  if (coreOk && skillsLoaded > 0 && collectorOk) {
     banner.classList.add("ok");
     document.getElementById("banner-icon").textContent = "✓";
     document.getElementById("banner-icon").style.color = "var(--good)";
     document.getElementById("banner-title").textContent = "All systems operational";
-    document.getElementById("banner-sub").textContent = "Sohn and the ACTi Platform are responding normally";
-  } else if (sohnReady || platform.ok) {
+    document.getElementById("banner-sub").textContent = "Engine, API, UI, skills, and status collector all responding normally";
+  } else if (coreOk) {
+    banner.classList.add("warn");
+    document.getElementById("banner-icon").textContent = "!";
+    document.getElementById("banner-icon").style.color = "var(--warn)";
+    document.getElementById("banner-title").textContent = "Core operational, auxiliary degraded";
+    document.getElementById("banner-sub").textContent = "Chat works; one or more secondary services are not responding";
+  } else if (apiOk || uiOk) {
     banner.classList.add("warn");
     document.getElementById("banner-icon").textContent = "!";
     document.getElementById("banner-icon").style.color = "var(--warn)";
     document.getElementById("banner-title").textContent = "Partial outage";
-    document.getElementById("banner-sub").textContent = "Some services are degraded";
+    document.getElementById("banner-sub").textContent = "One or more core services are degraded";
   } else {
     banner.classList.add("down");
     document.getElementById("banner-icon").textContent = "✗";
     document.getElementById("banner-icon").style.color = "var(--bad)";
     document.getElementById("banner-title").textContent = "Service unavailable";
-    document.getElementById("banner-sub").textContent = "Cannot reach endpoints";
+    document.getElementById("banner-sub").textContent = "Cannot reach core endpoints";
   }
 
-  // Pull historical record from the collector
-  try {
-    const histR = await fetch("/status/history.json", { cache: "no-store" });
-    if (histR.ok) {
-      const hist = await histR.json();
-      renderHistory(hist);
-    }
-  } catch {}
+  if (history) renderHistory(history);
 
   document.getElementById("last-upd").textContent = new Date().toLocaleTimeString();
 }

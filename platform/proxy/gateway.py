@@ -953,16 +953,49 @@ app.add_api_route("/raw/models", raw_list_models, methods=["GET"])
 
 @app.get("/health")
 async def health(request: Request):
+    """Liveness + (optional) detail probe.
+
+    Default returns the minimal envelope for orchestrators / nginx checks.
+    `?detail=1` adds the breakdown the status page renders — engine state,
+    skill catalogue size, active per-user memory partitions, and which
+    optional integrations are wired up.
+    """
     client: httpx.AsyncClient = request.app.state.client
+    engine_ok = False
     try:
         r = await client.get("/health", timeout=5.0)
-        return {
-            "status": "ok" if r.status_code == 200 else "degraded",
-            "model": SERVED_NAME,
-            "version": "0.0.1",
-        }
+        engine_ok = r.status_code == 200
     except Exception:
-        return {"status": "down", "model": SERVED_NAME, "version": "0.0.1"}
+        engine_ok = False
+
+    base = {
+        "status": "ok" if engine_ok else ("degraded" if engine_ok is False else "down"),
+        "model": SERVED_NAME,
+        "version": "0.1.0",
+    }
+    if request.query_params.get("detail") not in ("1", "true", "yes"):
+        return base
+
+    # Detail block — cheap reads, all in-process.
+    user_root = MEMORY_DIR / "users"
+    try:
+        partition_count = sum(1 for p in user_root.iterdir() if p.is_dir()) if user_root.exists() else 0
+    except OSError:
+        partition_count = 0
+
+    skills = getattr(request.app.state, "skills", {}) or {}
+    base["detail"] = {
+        "engine": "ok" if engine_ok else "down",
+        "proxy": "ok",  # we got here, so proxy is up
+        "skills_loaded": len(skills),
+        "skill_names": sorted(skills.keys()),
+        "memory_partitions": partition_count,
+        "memory_extraction": MEMORY_EXTRACTION_ENABLED,
+        "media_enabled": media.media_enabled(),
+        "library_enabled": library.library_enabled(),
+        "auth_enforced": bool(request.app.state.api_keys),
+    }
+    return base
 
 
 if __name__ == "__main__":
