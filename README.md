@@ -102,7 +102,7 @@ The full system prompt lives in [`platform/system_prompts/sohn.txt`](platform/sy
                 │                          │
                 ▼                          ▼
        ┌──────────────┐            ┌──────────────┐
-       │   OpenWebUI  │            │  Sohn proxy  │  /v1/* and /raw/v1/*
+       │   acti-ui    │            │  ACTi gateway│  /v1/* and /raw/v1/*
        │   (chat UI)  │            │  (FastAPI)   │
        └──────┬───────┘            └──────┬───────┘
               │ OpenAI SDK                │

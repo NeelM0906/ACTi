@@ -24,7 +24,7 @@ $EDITOR .env                # fill in ACTI_MODEL_ID, parsers, HF_TOKEN
 
 > If you already cloned without `--recurse-submodules`, run
 > `git submodule update --init --recursive` from the repo root before bootstrapping.
-> The `vendor/acti-ui/` submodule is our forked OpenWebUI and must be present.
+> The `vendor/acti-ui/` submodule is the ACTi chat UI source tree and must be present.
 
 When complete, the platform is reachable on port `8888`:
 
@@ -44,11 +44,11 @@ The orchestrator (`00_bootstrap.sh`) calls each step in order. They can also be 
 |---|---|
 | `01_install_system.sh` | apt deps: nginx, tmux, OpenMPI runtime, build tools, Node.js 20 (for the acti-ui frontend build) |
 | `02_install_rocm.sh` | ROCm 7.2.1 userspace + dev headers; cleans up older `/opt/rocm-*` from `ldconfig` |
-| `03_install_python_env.sh` | Creates the `acti-inference` conda env, installs ROCm-built torch + the vLLM fallback engine + runtime deps. Also `pip install`s `vendor/acti-ui/` (our forked OpenWebUI), which triggers `npm install` and `npm run build` for the SvelteKit frontend |
+| `03_install_python_env.sh` | Creates the `acti-inference` conda env, installs ROCm-built torch + the vLLM fallback engine + runtime deps. Also `pip install`s `vendor/acti-ui/` (the ACTi chat UI), which triggers `npm install` and `npm run build` for the SvelteKit frontend |
 | `03b_install_sglang.sh` | Clones the env to `acti-sglang` and builds SGLang from source against ROCm. SGLang is the default engine — set `ACTI_SKIP_SGLANG=1` if you only need the vLLM fallback |
 | `05_install_artifacts.sh` | Copies the platform code/config to `/opt/acti/`, sets up `/var/lib/acti/` and `/var/log/acti/`, installs the nginx config |
 | `06_download_model.sh` | Downloads model weights into `/var/lib/acti/hf-cache` using your `HF_TOKEN` |
-| `07_start_all.sh` | Starts the inference engine (selected by `ACTI_INFERENCE_ENGINE`, default `sglang`), Sohn API proxy, OpenWebUI, and the status collector — each in its own tmux session |
+| `07_start_all.sh` | Starts the inference engine (selected by `ACTI_INFERENCE_ENGINE`, default `sglang`), Sohn API proxy, acti-ui, and the status collector — each in its own tmux session |
 
 ## Required environment variables
 
@@ -140,7 +140,7 @@ ACTI_INFERENCE_ENGINE=vllm bash startup/07_start_all.sh
 | torch sanity check segfaults during step 3 | older `/opt/rocm-*` libraries are still in `/etc/ld.so.conf.d/` — verify only one ROCm version is exposed via `ldconfig -p \| grep rocm` |
 | inference engine fails to load model | double-check `ACTI_MODEL_ID` and `HF_TOKEN`, and that the model is downloaded under `$ACTI_HF_HOME` |
 | `/status` returns 403 | nginx user (`www-data`) can't read `/usr/share/nginx/html/acti-status/` — re-run step 5 to fix permissions |
-| OpenWebUI shows `(Open WebUI)` suffix | step 4 patched the wrong python env (a version upgrade may have re-installed) — re-run `04_patch_openwebui.sh` |
+| chat UI title bar still says `Open WebUI` | shouldn't happen — branding is baked into the acti-ui fork. If you see it, the running package is upstream, not the fork; re-run step 3 to reinstall from `vendor/acti-ui/` |
 
 ## Production hardening (not yet automated)
 
@@ -150,4 +150,4 @@ The bootstrap brings up a dev/single-machine deployment using `tmux`. Before exp
 - Put a TLS terminator (Caddy / Cloudflare / load balancer) in front of nginx :8888
 - Rotate the API keys in `/var/lib/acti/api-keys.txt`; never commit them
 - Lock down inbound firewall to TCP/8888 only
-- Restrict OpenWebUI signups to invite-only via the admin panel (after first admin signs up)
+- Restrict chat UI signups to invite-only via the admin panel (after first admin signs up)

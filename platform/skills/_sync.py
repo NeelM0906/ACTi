@@ -1,10 +1,10 @@
-"""Sync /opt/acti/skills/<name>/SKILL.md into OpenWebUI's `skill` table.
+"""Sync /opt/acti/skills/<name>/SKILL.md into the acti-ui `skill` table.
 
 The file system is the source of truth. Skills authored on disk under
-ACTI_SKILLS_DIR show up under Workspace -> Skills in OWUI; deleting the
-directory makes the row disappear on the next sync. Edits made through
-the OWUI UI to a sohn-platform skill will be overwritten on the next
-sync — file system wins.
+ACTI_SKILLS_DIR show up under Workspace -> Skills in the ACTi chat UI;
+deleting the directory makes the row disappear on the next sync. Edits
+made through the chat UI to a platform-managed skill will be overwritten
+on the next sync — file system wins.
 
 Re-runnable. Idempotent: if no SKILL.md content changed since the last
 run, no rows are updated and updated_at stays put.
@@ -21,9 +21,12 @@ import uuid
 from pathlib import Path
 from typing import Tuple
 
-DEFAULT_DB = Path(os.environ.get("OWUI_DB", "/root/open-webui-data/webui.db"))
+DEFAULT_DB = Path(os.environ.get("OWUI_DB", "/var/lib/acti/openwebui/webui.db"))
 DEFAULT_SKILLS_DIR = Path(os.environ.get("ACTI_SKILLS_DIR", "/opt/acti/skills"))
-ORIGIN_TAG = "sohn-platform"
+# Tag every row we own so the cleanup step only deletes platform-managed
+# skills and leaves user-authored ones alone. Reading code: `meta.origin`
+# starting with `acti.` ⇒ this row is managed by the ACTi platform.
+ORIGIN_TAG = "acti.skills"
 
 
 def _parse_frontmatter(text: str) -> Tuple[dict, str]:
@@ -102,8 +105,10 @@ def sync_once(db_path: Path = DEFAULT_DB, skills_dir: Path = DEFAULT_SKILLS_DIR)
             else:
                 unchanged += 1
 
-        # Delete OWUI rows whose origin is sohn-platform but whose source file
-        # is gone. Rows without origin=sohn-platform are user-authored — leave them.
+        # Delete platform-managed rows whose source file is gone. Rows that
+        # don't carry our origin tag (and legacy "sohn-platform") are user-
+        # authored — leave them alone.
+        owned = {ORIGIN_TAG, "sohn-platform"}  # legacy tag, accept on read
         for sid, sname, smeta in con.execute(
             "SELECT id, name, meta FROM skill"
         ).fetchall():
@@ -111,7 +116,7 @@ def sync_once(db_path: Path = DEFAULT_DB, skills_dir: Path = DEFAULT_SKILLS_DIR)
                 m = json.loads(smeta or "{}")
             except Exception:
                 m = {}
-            if m.get("origin") == ORIGIN_TAG and sname not in seen:
+            if m.get("origin") in owned and sname not in seen:
                 con.execute("DELETE FROM skill WHERE id = ?", (sid,))
                 deleted += 1
 

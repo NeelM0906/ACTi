@@ -14,7 +14,7 @@ cd "$( dirname -- "${BASH_SOURCE[0]}" )"
 
 [ -f .env ] || { echo "Missing startup/.env — copy from env.example and fill in"; exit 1; }
 
-# vendor/acti-ui (forked OpenWebUI with ACTi branding) must be checked out
+# vendor/acti-ui (the ACTi chat UI source tree) must be checked out
 # before step 03 builds it.
 git -C .. submodule update --init --recursive
 

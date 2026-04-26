@@ -80,15 +80,15 @@ $PIP install $ROCM_INDEX -c /tmp/acti-torch-constraint.txt "torchaudio==2.9.0+ea
 echo "  installing OpenAI SDK (for tests) ..."
 $PIP install openai
 
-# acti-ui — our soft fork of open-webui, with ACTi branding baked in.
-# Lives as a git submodule at vendor/acti-ui/. The hatch build hook runs
-# `npm install` + `npm run build` during pip install.
+# acti-ui — the ACTi chat UI source tree. Lives as a git submodule at
+# vendor/acti-ui/. The hatch build hook runs `npm install` + `npm run
+# build` during pip install.
 ACTI_UI_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/.." &> /dev/null && pwd )/vendor/acti-ui"
 if [ ! -f "$ACTI_UI_DIR/pyproject.toml" ]; then
   echo "  vendor/acti-ui submodule missing — run 'git submodule update --init --recursive' from repo root"
   exit 1
 fi
-echo "  building acti-ui (forked OpenWebUI) from $ACTI_UI_DIR ..."
+echo "  building acti-ui from $ACTI_UI_DIR ..."
 $PIP install "$ACTI_UI_DIR"
 
 # Final smoke

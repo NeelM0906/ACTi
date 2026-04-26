@@ -205,14 +205,32 @@ async def chat_completions(request: Request):
     skill_lib: dict = request.app.state.skills
     client_passed_tools = bool(body.get("tools"))
 
-    # OWUI sends a `features` block to indicate which native toggles are on
-    # (image_generation, code_interpreter, web_search). When image OR video
-    # generation is toggled, the OWUI backend handles the gen call directly
-    # and posts the result back into the message — so we must NOT also let
-    # the model invoke our generate_* tool, or we'll get duplicate output.
+    # The chat UI sends a `features` block to indicate which native toggles
+    # are on (image_generation, code_interpreter, web_search, video_generation).
+    # When image OR video generation is toggled, the chat UI handles the gen
+    # call directly and posts the result back into the message — we must NOT
+    # also let the model invoke our generate_* tool or we'd get duplicate output.
     features = body.get("features") or {}
     suppress_image = bool(features.get("image_generation"))
     suppress_video = bool(features.get("video_generation"))
+
+    # Reserved tool names — always owned by the proxy regardless of who tried
+    # to register them in body["tools"]. Prevents a user-defined OWUI tool
+    # named (say) `generate_image` from shadowing our authoritative version.
+    OWNED_TOOLS = {"load_skill", "generate_image", "generate_video"}
+    if client_passed_tools:
+        client_tool_names = {
+            (t.get("function") or {}).get("name") for t in body.get("tools") or []
+        }
+        collisions = client_tool_names & OWNED_TOOLS
+        if collisions:
+            _log(f"[gateway] reserved tool name collision: {collisions} — proxy keeps authority")
+            # Drop the client's stale schemas; we'll re-add ours below.
+            body["tools"] = [
+                t for t in body.get("tools") or []
+                if (t.get("function") or {}).get("name") not in OWNED_TOOLS
+            ]
+            client_passed_tools = bool(body["tools"])  # may now be empty
 
     # Skill / media tools activate when the caller didn't bring its own.
     use_skills = bool(skill_lib) and not client_passed_tools

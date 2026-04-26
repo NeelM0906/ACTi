@@ -1,7 +1,7 @@
 #!/bin/bash
-# Daemon that mirrors platform/skills/<name>/SKILL.md into OpenWebUI's `skill`
-# table on a polling loop. The file system is the source of truth. Run under
-# tmux as the `acti-skill-sync` service.
+# Daemon that mirrors platform/skills/<name>/SKILL.md into the acti-ui
+# `skill` table on a polling loop. File system is the source of truth.
+# Runs under tmux as the `acti-skill-sync` service.
 set -e
 set -o pipefail
 

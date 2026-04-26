@@ -1,6 +1,7 @@
 #!/bin/bash
-# acti-ui (our forked OpenWebUI) wired to the Sohn proxy.
-# Branding lives natively in the fork at vendor/acti-ui — no env-var or CSS hacks.
+# acti-ui — the ACTi chat UI. Wired to the Sohn proxy via the OpenAI
+# compatibility surface. Branding lives natively in the fork at
+# vendor/acti-ui.
 set -e
 source /opt/conda/etc/profile.d/conda.sh
 conda activate vllm-rocm
