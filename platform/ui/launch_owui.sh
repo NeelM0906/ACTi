@@ -29,6 +29,18 @@ export DEFAULT_MODELS="Sohn"
 # platform-managed skill / tool sync daemons don't create. For our 4-10 person
 # team where the admin manages the catalog, bypass is the right default.
 export BYPASS_ADMIN_ACCESS_CONTROL=true
+# Same idea, but for the model access filter — Sohn is a backend-fetched
+# model with no preset row, so without bypass the per-user filter at
+# routers/openai.get_filtered_models hides it from non-admin users
+# entirely (only admins fall through the elif user.role == 'admin'
+# branch). For our team model this is the right default.
+export BYPASS_MODEL_ACCESS_CONTROL=true
+
+# Static-asset dir override — the chat UI's branding files (favicon,
+# user.png, splash images) are produced by the SvelteKit build into
+# `frontend/static/` and we want the FastAPI /static mount to serve from
+# there so the sidebar + avatars don't render as broken images.
+export STATIC_DIR=/opt/conda/envs/vllm-rocm/lib/python3.12/site-packages/open_webui/frontend
 
 # --- Data ---
 export DATA_DIR="${ACTI_OWUI_DATA_DIR:-/var/lib/acti/openwebui}"

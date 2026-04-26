@@ -91,6 +91,24 @@ fi
 echo "  building acti-ui from $ACTI_UI_DIR ..."
 $PIP install "$ACTI_UI_DIR"
 
+# acti-ui's pip MANIFEST drops top-level static files (favicon, user.png,
+# manifest.json, etc.) — they're produced by the SvelteKit build into
+# vendor/acti-ui/build/ but never end up in the installed package's
+# frontend/. Copy them by hand so the chat UI's logo/avatars don't render
+# as broken images.
+ACTI_UI_INSTALLED="/opt/conda/envs/$ENV_NAME/lib/python3.12/site-packages/open_webui/frontend"
+ACTI_UI_BUILD="$ACTI_UI_DIR/build"
+if [ -d "$ACTI_UI_BUILD" ] && [ -d "$ACTI_UI_INSTALLED" ]; then
+  for f in favicon.png favicon-96x96.png favicon.svg favicon.ico \
+           apple-touch-icon.png splash.png splash-dark.png logo.png \
+           user.png image-placeholder.png manifest.json \
+           marker-icon.png marker-icon-2x.png marker-shadow.png \
+           opensearch.xml robots.txt; do
+    [ -f "$ACTI_UI_BUILD/$f" ] && cp "$ACTI_UI_BUILD/$f" "$ACTI_UI_INSTALLED/$f"
+  done
+  echo "  patched static assets into $ACTI_UI_INSTALLED"
+fi
+
 # Final smoke
 $ENV_PY -c "
 import torch, vllm
