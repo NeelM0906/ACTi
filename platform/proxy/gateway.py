@@ -38,6 +38,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import cortex
+import library
 import media
 import skills
 from spark import ToolLabels, run_agent_stream, run_agent_sync
@@ -84,6 +85,8 @@ _TOOL_LABELS: dict[str, ToolLabels] = {
                                  progress="still generating"),
     "generate_video": ToolLabels(start="Generating video — this can take 30-180s",
                                  progress="still generating"),
+    "recall_context": ToolLabels(start="Searching the Unblinded library",
+                                 progress="still searching"),
 }
 
 
@@ -100,6 +103,7 @@ def _build_tool_handlers(skill_lib: dict[str, dict]) -> dict:
         "load_skill":     _load_skill,
         "generate_image": media.handle_generate_image,
         "generate_video": media.handle_generate_video,
+        "recall_context": library.handle_recall_context,
     }
 
 
@@ -122,6 +126,7 @@ async def lifespan(app: FastAPI):
         f"keys_loaded={len(app.state.api_keys)} "
         f"skills_loaded={list(app.state.skills.keys()) or 'none'} "
         f"media={'ON ('+media.LUMEN_BASE_URL+')' if media.media_enabled() else 'OFF'} "
+        f"library={'ON ('+library.LIBRARY_BASE_URL+')' if library.library_enabled() else 'OFF'} "
         f"memory={MEMORY_DIR} ({n_memories} files, extraction={'ON' if MEMORY_EXTRACTION_ENABLED else 'OFF'})"
     )
     yield
@@ -217,7 +222,7 @@ async def chat_completions(request: Request):
     # Reserved tool names — always owned by the proxy regardless of who tried
     # to register them in body["tools"]. Prevents a user-defined OWUI tool
     # named (say) `generate_image` from shadowing our authoritative version.
-    OWNED_TOOLS = {"load_skill", "generate_image", "generate_video"}
+    OWNED_TOOLS = {"load_skill", "generate_image", "generate_video", "recall_context"}
     if client_passed_tools:
         client_tool_names = {
             (t.get("function") or {}).get("name") for t in body.get("tools") or []
@@ -232,10 +237,11 @@ async def chat_completions(request: Request):
             ]
             client_passed_tools = bool(body["tools"])  # may now be empty
 
-    # Skill / media tools activate when the caller didn't bring its own.
+    # Skill / media / library tools activate when the caller didn't bring its own.
     use_skills = bool(skill_lib) and not client_passed_tools
     use_media = media.media_enabled() and not client_passed_tools
-    use_proxy_tools = use_skills or use_media
+    use_library = library.library_enabled() and not client_passed_tools
+    use_proxy_tools = use_skills or use_media or use_library
 
     body["messages"] = _inject_system_prompt(
         body.get("messages", []),
@@ -283,6 +289,8 @@ async def chat_completions(request: Request):
                 proxy_tools.append(media.GENERATE_IMAGE_TOOL)
             if not suppress_video:
                 proxy_tools.append(media.GENERATE_VIDEO_TOOL)
+        if use_library:
+            proxy_tools.append(library.RECALL_CONTEXT_TOOL)
         if suppress_image or suppress_video:
             _log(f"[gateway] feature toggles active: "
                  f"image_gen={'OWUI' if suppress_image else 'agent'} "

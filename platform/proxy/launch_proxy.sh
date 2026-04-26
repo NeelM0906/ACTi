@@ -19,8 +19,9 @@ echo "[$(date -Is)] proxy launching on :$ACTI_PROXY_PORT" | tee -a "$LOG"
 
 export SOHN_PROXY_PORT="$ACTI_PROXY_PORT"
 
-# Optional: load media (Lumen) credentials from a non-tracked env file.
-# Keep this OUTSIDE the repo. Format: shell-style `KEY=VALUE` lines.
-[ -f /etc/acti/media.env ] && set -a && . /etc/acti/media.env && set +a
+# Optional: load tool credentials from non-tracked env files.
+# Keep these OUTSIDE the repo. Format: shell-style `KEY=VALUE` lines.
+[ -f /etc/acti/media.env ]   && set -a && . /etc/acti/media.env   && set +a
+[ -f /etc/acti/library.env ] && set -a && . /etc/acti/library.env && set +a
 
 exec python "$SCRIPT_DIR/gateway.py" 2>&1 | tee -a "$LOG"

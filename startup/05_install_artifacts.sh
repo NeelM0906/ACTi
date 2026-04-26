@@ -14,6 +14,7 @@ sudo cp "$REPO_ROOT/platform/proxy/cortex.py"               /opt/acti/proxy/
 sudo cp "$REPO_ROOT/platform/proxy/cortex_prompts.py"       /opt/acti/proxy/
 sudo cp "$REPO_ROOT/platform/proxy/skills.py"               /opt/acti/proxy/
 sudo cp "$REPO_ROOT/platform/proxy/media.py"                /opt/acti/proxy/
+sudo cp "$REPO_ROOT/platform/proxy/library.py"              /opt/acti/proxy/
 sudo cp "$REPO_ROOT/platform/proxy/launch_proxy.sh"         /opt/acti/proxy/
 sudo cp "$REPO_ROOT/platform/system_prompts/sohn.txt"       /opt/acti/system_prompts/
 sudo cp "$REPO_ROOT/platform/ui/launch_owui.sh"             /opt/acti/ui/
