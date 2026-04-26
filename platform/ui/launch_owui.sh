@@ -23,6 +23,11 @@ export WEBUI_AUTH=true
 export DEFAULT_MODELS="Sohn"
 # DEFAULT_USER_ROLE intentionally NOT set so the first signup becomes admin.
 # Future signups default to "pending" via the admin panel after first admin exists.
+# Admins see ALL resources regardless of access grants — without this, OWUI 0.9.2
+# requires an explicit access_grant row per resource per user, which our
+# platform-managed skill / tool sync daemons don't create. For our 4-10 person
+# team where the admin manages the catalog, bypass is the right default.
+export BYPASS_ADMIN_ACCESS_CONTROL=true
 
 # --- Data ---
 export DATA_DIR="${ACTI_OWUI_DATA_DIR:-/var/lib/acti/openwebui}"
