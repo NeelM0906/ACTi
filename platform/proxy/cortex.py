@@ -53,6 +53,7 @@ DESIGN NOTES
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import sys
@@ -314,28 +315,121 @@ def read_index(memory_dir: Path, *, max_lines: int = 200) -> str:
     return "\n".join(lines)
 
 
+# ---------- per-user partitioning ----------
+#
+# Memory is partitioned per end-user. Each user's memories live under a
+# dedicated subdirectory derived from the OpenAI-standard `user` field of
+# the chat completion request. Without partitioning, one user's "my name
+# is Neel" memory file would be injected into another user's system prompt,
+# causing cross-account identity leakage.
+
+# Allowed chars in a directly-usable user_id segment. Anything outside this
+# set forces a hash fallback so weird inputs (emails with @, plus signs,
+# unicode, path traversal attempts) cannot escape the per-user namespace.
+_USER_ID_RE = re.compile(r"[^A-Za-z0-9._-]")
+_USER_ID_MAX_LEN = 64
+
+
+def sanitize_user_id(user_id: str | None) -> str:
+    """Map a raw user identifier to a stable, filesystem-safe segment.
+
+    Same input always produces the same output. Inputs containing chars
+    outside [A-Za-z0-9._-] or longer than 64 chars are mapped through a
+    sha256 prefix so the result stays bounded and traversal-safe.
+    Returns "_anonymous" for empty / None inputs.
+    """
+    if user_id is None:
+        return "_anonymous"
+    if not isinstance(user_id, str):
+        user_id = str(user_id)
+    user_id = user_id.strip()
+    if not user_id:
+        return "_anonymous"
+    cleaned = _USER_ID_RE.sub("_", user_id)
+    if cleaned != user_id or len(cleaned) > _USER_ID_MAX_LEN:
+        h = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:16]
+        # Build a strict alphanumeric prefix for human readability — keep only
+        # [A-Za-z0-9] so no '.' / '..' / '_' run can survive into the segment.
+        prefix = re.sub(r"[^A-Za-z0-9]", "", cleaned)[:16] or "u"
+        return f"{prefix}_{h}"
+    # Even when the input is "clean", reject standalone ".." or "." (which match
+    # the [A-Za-z0-9._-] charclass but are filesystem-special).
+    if cleaned in ("", ".", ".."):
+        h = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:16]
+        return f"u_{h}"
+    return cleaned
+
+
+def user_memory_dir(base: Path, user_id: str | None) -> Path:
+    """Per-user memory directory under `<base>/users/<sanitized_id>/`.
+
+    Always returns a path; callers are responsible for mkdir before write.
+    Reads on a non-existent dir are handled gracefully by read_index().
+    """
+    return base / "users" / sanitize_user_id(user_id)
+
+
+def has_any_memory(memory_dir: Path) -> bool:
+    """True if this user has at least one memory file (excluding the index)."""
+    if not memory_dir.exists():
+        return False
+    for p in memory_dir.glob("*.md"):
+        if p.name == "MEMORY.md":
+            continue
+        return True
+    return False
+
+
 # ---------- memory injection ----------
+
+_ONBOARDING_BLOCK = (
+    "\n\n## First interaction with this user\n\n"
+    "You have not spoken with this user before — you do not know their name "
+    "or anything about them yet. Your very first response in this conversation "
+    "must:\n"
+    "  1. Briefly introduce yourself in one short line.\n"
+    "  2. Politely ask the user for their full name so you can address them "
+    "properly going forward.\n"
+    "Once they share it, acknowledge it briefly and continue with their actual "
+    "request. If they decline, sidestep, or ask you to skip the introduction, "
+    "do not press — proceed naturally and address them however they prefer. "
+    "Do not invent a name, do not assume a name from any other source, and do "
+    "not address the user by a name they have not given you in THIS conversation.\n"
+)
+
 
 def inject_memories(
     messages: list[dict],
     memory_dir: Path,
+    *,
+    include_onboarding: bool = False,
 ) -> list[dict]:
-    """Prepend MEMORY.md to the system prompt, if any. Idempotent: if
-    no memories exist, returns `messages` unchanged. Safe to call on
-    every request — file read is microseconds.
+    """Prepend MEMORY.md and/or an onboarding block to the system prompt.
+
+    Idempotent: if neither memories nor onboarding apply, returns
+    `messages` unchanged. Safe to call on every request.
+
+    `include_onboarding=True` injects a one-time first-interaction block
+    that tells the model to ask for the user's full name. Caller decides
+    when to set this — typically when `has_any_memory(memory_dir)` is False.
     """
     index = read_index(memory_dir)
-    if not index.strip():
+    parts: list[str] = []
+    if index.strip():
+        parts.append(
+            "\n\n## Memory\n\n"
+            "The following memories from prior sessions may be relevant. Each "
+            "is a one-line pointer to a memory file. When directly relevant, "
+            "internalise them silently — do not narrate the recall.\n\n"
+            + index
+            + "\n"
+        )
+    if include_onboarding:
+        parts.append(_ONBOARDING_BLOCK)
+    if not parts:
         return messages
 
-    block = (
-        "\n\n## Memory\n\n"
-        "The following memories from prior sessions may be relevant. Each "
-        "is a one-line pointer to a memory file. When directly relevant, "
-        "internalise them silently — do not narrate the recall.\n\n"
-        + index
-        + "\n"
-    )
+    block = "".join(parts)
 
     if messages and messages[0].get("role") == "system":
         sys_msg = messages[0]

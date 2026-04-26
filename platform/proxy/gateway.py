@@ -233,6 +233,32 @@ def _is_auxiliary_call(body: dict) -> bool:
 
 # ---------- app lifespan ----------
 
+def _quarantine_legacy_memory(memory_dir: Path) -> int:
+    """Move any *.md files at the root of memory_dir into a quarantine
+    subfolder. These are pre-partitioning global memories that would have
+    been visible to every user — moving them out fixes the cross-user leak.
+
+    Returns the number of files quarantined. Idempotent: a clean dir is a
+    no-op. Files in subdirectories (per-user partitions) are untouched.
+    """
+    if not memory_dir.exists():
+        return 0
+    legacy = [p for p in memory_dir.iterdir() if p.is_file() and p.suffix == ".md"]
+    if not legacy:
+        return 0
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    dest = memory_dir / "_legacy_quarantine" / ts
+    dest.mkdir(parents=True, exist_ok=True)
+    moved = 0
+    for p in legacy:
+        try:
+            p.rename(dest / p.name)
+            moved += 1
+        except OSError as e:
+            _log(f"[gateway] failed to quarantine legacy memory {p.name}: {e}")
+    return moved
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     limits = httpx.Limits(
@@ -244,14 +270,24 @@ async def lifespan(app: FastAPI):
     app.state.skills_manifest = skills.skills_manifest_block(app.state.skills)
     app.state.skills_mtime = skills.skills_dir_mtime()
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    n_memories = len(list(MEMORY_DIR.glob("*.md"))) - (1 if (MEMORY_DIR / "MEMORY.md").exists() else 0)
+    quarantined = _quarantine_legacy_memory(MEMORY_DIR)
+    if quarantined:
+        _log(
+            f"[gateway] WARNING: quarantined {quarantined} legacy global memory "
+            f"file(s) — these were previously visible to all users. Per-user "
+            f"partitioning is now active. Review {MEMORY_DIR}/_legacy_quarantine/ "
+            f"before deletion."
+        )
+    user_root = MEMORY_DIR / "users"
+    n_users = len([p for p in user_root.glob("*") if p.is_dir()]) if user_root.exists() else 0
     _log(
         f"[gateway] started. auth={'ON' if app.state.api_keys else 'OFF (dev)'} "
         f"keys_loaded={len(app.state.api_keys)} "
         f"skills_loaded={list(app.state.skills.keys()) or 'none'} "
         f"media={'ON ('+media.LUMEN_BASE_URL+')' if media.media_enabled() else 'OFF'} "
         f"library={'ON ('+library.LIBRARY_BASE_URL+')' if library.library_enabled() else 'OFF'} "
-        f"memory={MEMORY_DIR} ({n_memories} files, extraction={'ON' if MEMORY_EXTRACTION_ENABLED else 'OFF'})"
+        f"memory={MEMORY_DIR} ({n_users} user partitions, "
+        f"extraction={'ON' if MEMORY_EXTRACTION_ENABLED else 'OFF'})"
     )
     yield
     await app.state.client.aclose()
@@ -406,8 +442,29 @@ async def chat_completions(request: Request):
         skills_manifest=request.app.state.skills_manifest if use_skills else "",
     )
 
-    # Cortex: inject saved memories into the system prompt at request start.
-    body["messages"] = cortex.inject_memories(body["messages"], MEMORY_DIR)
+    # Cortex: per-user memory partitioning. body["user"] is the OpenAI-standard
+    # end-user identifier; OWUI sets it to the signed-in user's id. Without
+    # partitioning by it, one user's saved memories (e.g. their name) leak into
+    # every other user's system prompt.
+    raw_user_id = body.get("user") if isinstance(body.get("user"), str) else None
+    user_mem_dir = cortex.user_memory_dir(MEMORY_DIR, raw_user_id)
+    # First-interaction onboarding: when this user has zero memory files, ask
+    # the model to introduce itself and request the user's full name. Auto-
+    # cleared as soon as any memory is saved by the extractor.
+    is_first_interaction = not cortex.has_any_memory(user_mem_dir)
+    body["messages"] = cortex.inject_memories(
+        body["messages"], user_mem_dir, include_onboarding=is_first_interaction,
+    )
+    # Don't forward the OWUI user id to the engine — it's a routing/storage
+    # identifier, not part of the chat itself.
+    body.pop("user", None)
+    if raw_user_id:
+        _log(
+            f"[gateway] user partition: {cortex.sanitize_user_id(raw_user_id)} "
+            f"(onboarding={'YES' if is_first_interaction else 'no'})"
+        )
+    else:
+        _log("[gateway] no body.user — using shared _anonymous partition")
 
     client: httpx.AsyncClient = request.app.state.client
 
@@ -434,7 +491,7 @@ async def chat_completions(request: Request):
         # Fire and forget — memory extraction must never block the user.
         import asyncio as _aio
         _aio.create_task(cortex.extract_memories(
-            client=client, messages=list(msgs), memory_dir=MEMORY_DIR,
+            client=client, messages=list(msgs), memory_dir=user_mem_dir,
             served_name=SERVED_NAME,
         ))
 
