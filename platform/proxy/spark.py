@@ -101,6 +101,86 @@ def _default_log(line: str) -> None:
     print(line, file=sys.stdout, flush=True)
 
 
+# ---------- content scrubber ----------
+
+class _ToolCallStripper:
+    """Strip <tool_call>…</tool_call> blocks from streamed content.
+
+    The engine's tool-call parser occasionally lets a malformed tool-call
+    template through as plain content text — typically when the model emits
+    a tool call under sustained adversarial pressure (e.g. trying to call
+    recall_context to answer "what model are you") and the chat template's
+    parser doesn't catch the variant. The leaked block looks like:
+
+        <tool_call>function=recall_context>
+        <parameter=query>…</parameter>
+        </function>
+        </tool_call>
+
+    Without filtering, the user sees raw XML in the chat stream. We can't
+    rescue these into structured tool calls reliably (the format varies),
+    so we just drop them.
+
+    State machine: PASS -> (sees OPEN) -> SUPPRESS -> (sees CLOSE) -> PASS.
+    Held lookahead in PASS state prevents emitting partial tag prefixes.
+    """
+
+    OPEN = "<tool_call>"
+    CLOSE = "</tool_call>"
+    _LOOKAHEAD = max(len(OPEN), len(CLOSE))
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._suppressing = False
+        self.bytes_dropped = 0
+
+    def feed(self, chunk: str) -> str:
+        """Process one content chunk. Returns the cleaned text to forward."""
+        out: list[str] = []
+        self._buf += chunk
+        while True:
+            if self._suppressing:
+                idx = self._buf.find(self.CLOSE)
+                if idx == -1:
+                    # Drop everything except a trailing slice that might be
+                    # the start of CLOSE.
+                    keep = min(len(self.CLOSE) - 1, len(self._buf))
+                    self.bytes_dropped += len(self._buf) - keep
+                    self._buf = self._buf[-keep:] if keep else ""
+                    break
+                self.bytes_dropped += idx + len(self.CLOSE)
+                self._buf = self._buf[idx + len(self.CLOSE):]
+                self._suppressing = False
+                continue
+            idx = self._buf.find(self.OPEN)
+            if idx == -1:
+                # No open tag in buffer. Emit safe prefix, hold any trailing
+                # chars that could be the start of OPEN.
+                safe = len(self._buf)
+                for hold in range(min(self._LOOKAHEAD - 1, len(self._buf)), 0, -1):
+                    if self.OPEN.startswith(self._buf[-hold:]):
+                        safe = len(self._buf) - hold
+                        break
+                if safe:
+                    out.append(self._buf[:safe])
+                    self._buf = self._buf[safe:]
+                break
+            out.append(self._buf[:idx])
+            self._buf = self._buf[idx + len(self.OPEN):]
+            self._suppressing = True
+        return "".join(out)
+
+    def flush(self) -> str:
+        """Flush at end-of-stream. Drops any unterminated suppressed block."""
+        if self._suppressing:
+            self.bytes_dropped += len(self._buf)
+            self._buf = ""
+            self._suppressing = False
+            return ""
+        out, self._buf = self._buf, ""
+        return out
+
+
 # ---------- types ----------
 
 ToolHandler = Callable[[dict], Awaitable[str]]
@@ -194,6 +274,7 @@ async def _stream_one_turn(
 
     tool_calls: dict[int, dict] = {}
     finish_reason: str | None = None
+    stripper = _ToolCallStripper()
 
     try:
         async with client.stream(
@@ -249,13 +330,37 @@ async def _stream_one_turn(
                                 slot["function"]["name"] = fnd["name"]
                             if fnd.get("arguments") is not None:
                                 slot["function"]["arguments"] += fnd["arguments"]
+                    elif delta.get("content") is not None:
+                        # Run content through the tool-call stripper. If the
+                        # cleaned chunk is empty, drop the whole event so we
+                        # don't emit empty deltas downstream.
+                        cleaned = stripper.feed(delta["content"])
+                        if cleaned:
+                            evt["choices"][0]["delta"]["content"] = cleaned
+                            await queue.put(
+                                b"data: " + json.dumps(evt).encode() + b"\n\n"
+                            )
                     elif (
-                        delta.get("content") is not None
-                        or delta.get("reasoning_content") is not None
+                        delta.get("reasoning_content") is not None
                         or "role" in delta
                     ):
                         await queue.put(b"data: " + payload + b"\n\n")
                     elif fr is not None and fr != "tool_calls":
+                        # Flush any held content from the stripper before the
+                        # final non-tool-calls finish chunk so trailing safe
+                        # text isn't dropped.
+                        tail = stripper.flush()
+                        if tail:
+                            tail_evt = {
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"content": tail},
+                                    "finish_reason": None,
+                                }]
+                            }
+                            await queue.put(
+                                b"data: " + json.dumps(tail_evt).encode() + b"\n\n"
+                            )
                         await queue.put(b"data: " + payload + b"\n\n")
                     # else: tool_calls finish chunk — drop, runner handles it
 
