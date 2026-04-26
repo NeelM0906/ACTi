@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -398,9 +399,20 @@ _AUXILIARY_STYLE_GUARD = (
     "marks around the result. Match the user's language."
 )
 
+# Strip any "with an emoji" / "include emoji" clause from the existing system
+# prompt before appending the guard. The model otherwise has to reconcile two
+# contradictory instructions and sometimes resolves toward the more specific
+# (emoji-positive) one. Removing the conflict at the source is more reliable
+# than trusting last-instruction-wins.
+_EMOJI_INSTRUCTION_RE = re.compile(
+    r"(?i)\s*(?:with|including|using|plus|and|featuring)\s*(?:an?\s+)?emojis?\b"
+)
+
 
 def _augment_auxiliary_messages(messages: list) -> list:
-    """Append the style guard to (or prepend a new) system message."""
+    """Strip any pro-emoji clause from the system message and append the
+    style guard. Falls back to prepending a new system message when the
+    request didn't include one."""
     if messages and messages[0].get("role") == "system":
         sys_msg = messages[0]
         existing = sys_msg.get("content", "") or ""
@@ -408,7 +420,8 @@ def _augment_auxiliary_messages(messages: list) -> list:
             existing = "\n".join(
                 p.get("text", "") for p in existing if isinstance(p, dict)
             )
-        merged = str(existing).rstrip() + "\n\n" + _AUXILIARY_STYLE_GUARD
+        cleaned = _EMOJI_INSTRUCTION_RE.sub("", str(existing))
+        merged = cleaned.rstrip() + "\n\n" + _AUXILIARY_STYLE_GUARD
         return [{**sys_msg, "content": merged}] + messages[1:]
     return [{"role": "system", "content": _AUXILIARY_STYLE_GUARD}] + messages
 
