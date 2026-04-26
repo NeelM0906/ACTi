@@ -96,10 +96,19 @@ $PIP install "$ACTI_UI_DIR"
 # Without these the chat UI returns 404 at / and renders broken images
 # in the sidebar / avatars. Copy the entire build dir into the installed
 # package's frontend/ to fully patch.
+#
+# We use `cp -rf` (force overwrite) rather than `cp -rn` (no-clobber):
+# `-n` silently skips files when their parent dir already exists at the
+# destination, which is exactly what `pip install` produces — empty
+# `_app/` and `assets/` shells but no index.html alongside. The fork's
+# build/ IS the canonical source for these files; force-syncing keeps
+# the install honest.
 ACTI_UI_INSTALLED="/opt/conda/envs/$ENV_NAME/lib/python3.12/site-packages/open_webui/frontend"
 ACTI_UI_BUILD="$ACTI_UI_DIR/build"
 if [ -d "$ACTI_UI_BUILD" ] && [ -d "$ACTI_UI_INSTALLED" ]; then
-  cp -rn "$ACTI_UI_BUILD/." "$ACTI_UI_INSTALLED/" || true
+  cp -rf "$ACTI_UI_BUILD/." "$ACTI_UI_INSTALLED/"
+  test -f "$ACTI_UI_INSTALLED/index.html" \
+    || { echo "  ERROR: index.html still missing after MANIFEST patch"; exit 1; }
   echo "  patched MANIFEST gaps from $ACTI_UI_BUILD into $ACTI_UI_INSTALLED"
 fi
 
