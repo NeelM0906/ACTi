@@ -79,6 +79,8 @@ def load_api_keys() -> set[str]:
 # ---------- Spark wiring ----------
 
 _TOOL_LABELS: dict[str, ToolLabels] = {
+    "load_tool":      ToolLabels(start="Activating tool",
+                                 progress="activating"),
     "load_skill":     ToolLabels(start="Loading skill",
                                  progress="loading"),
     "generate_image": ToolLabels(start="Generating image",
@@ -90,11 +92,83 @@ _TOOL_LABELS: dict[str, ToolLabels] = {
 }
 
 
+# ---------- lazy tool loading ----------
+#
+# Real tools are NOT pre-registered on body["tools"]. Doing so puts every
+# schema into the chat-template's prompt for every request — auxiliary OWUI
+# calls (title gen, tag gen, follow-up suggestions) get them too, which:
+#   - bloats the prompt (~1500-3000 extra tokens per request)
+#   - triggers known engine issue (model enters "fast tool-call mode" when
+#     tools are present, which interacts unpredictably with thinking mode)
+#   - makes small-budget auxiliary calls deliberate themselves into a
+#     content=null / finish_reason=length state
+#
+# Instead we expose ONE bootstrap tool — `load_tool` — that takes a name and
+# registers the requested tool's schema into body["tools"] for use on
+# subsequent turns. The model then calls the actual tool normally.
+LOAD_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "load_tool",
+        "description": (
+            "Activate one of the platform's capability tools. Tools are not "
+            "pre-registered — call load_tool with the desired tool's name "
+            "FIRST, and on your next turn the tool's full schema will be "
+            "available for you to call directly with its proper arguments.\n\n"
+            "Available tools (call load_tool with one of these names):\n"
+            "- load_skill: load a domain skill's full instructions when you "
+            "need detailed knowledge or a workflow on a specific topic.\n"
+            "- generate_image: produce an image via the Lumen pipeline. "
+            "Use when the user asks for an image to be created.\n"
+            "- generate_video: produce a short video via the Lumen pipeline. "
+            "Use when the user asks for a video to be created.\n"
+            "- recall_context: search the Unblinded knowledge corpus for "
+            "person dossiers, case files, teaching material, and continuity "
+            "snapshots. Use when the user references corpus-specific entities "
+            "you don't have in context.\n\n"
+            "Do NOT call load_tool for general conversation, simple Q&A, or "
+            "anything you can answer from your training and the system prompt. "
+            "Only call it when one of the listed capabilities is required."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "enum": [
+                        "load_skill", "generate_image",
+                        "generate_video", "recall_context",
+                    ],
+                    "description": "The tool to activate.",
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def _real_tool_schemas() -> dict[str, dict]:
+    """Map of {tool_name -> full schema} for tools that load_tool can activate."""
+    return {
+        "load_skill":     skills.LOAD_SKILL_TOOL,
+        "generate_image": media.GENERATE_IMAGE_TOOL,
+        "generate_video": media.GENERATE_VIDEO_TOOL,
+        "recall_context": library.RECALL_CONTEXT_TOOL,
+    }
+
+
 def _build_tool_handlers(skill_lib: dict[str, dict]) -> dict:
     """Map of {tool_name: async handler(args) -> str} for Spark to dispatch.
 
     Closes over the live skill library so a hot-reload is visible to
     subsequent handler invocations without rewiring.
+
+    Includes handlers for ALL real tools — they're harmless when the
+    schema isn't registered on body["tools"] (model can't see them and
+    won't call them). When `load_tool` registers a schema mid-conversation,
+    the corresponding handler is already present here, ready to dispatch.
     """
     async def _load_skill(args: dict) -> str:
         return await skills.handle_load_skill(args, skill_lib)
@@ -105,6 +179,54 @@ def _build_tool_handlers(skill_lib: dict[str, dict]) -> dict:
         "generate_video": media.handle_generate_video,
         "recall_context": library.handle_recall_context,
     }
+
+
+def _make_load_tool_handler(body: dict, allowed: dict[str, dict]):
+    """Build a load_tool handler bound to this request's body and allowed
+    tool registry. When invoked it appends the requested tool's schema to
+    body["tools"] so it's available on subsequent turns."""
+    async def _handle(args: dict) -> str:
+        name = args.get("name")
+        if name not in allowed:
+            available = sorted(allowed.keys())
+            return (f"ERROR: '{name}' is not an available tool. "
+                    f"Available: {available}")
+        tools = body.setdefault("tools", [])
+        already = any(
+            (t.get("function") or {}).get("name") == name for t in tools
+        )
+        if not already:
+            tools.append(allowed[name])
+        return (f"Tool '{name}' is now activated. On your next turn, call "
+                f"'{name}' directly with the appropriate arguments.")
+    return _handle
+
+
+# ---------- auxiliary-call detection ----------
+#
+# OWUI sends several "internal" /v1/chat/completions calls that aren't real
+# user-facing chat — title generation, tag generation, follow-up suggestions,
+# autocomplete. These come with small max_tokens and don't need the Sohn
+# persona, the cortex memories, or any tools. Forcing them through the full
+# pipeline causes the model to over-deliberate (content=null,
+# finish_reason=length) and fans out cortex memory-extraction tasks for no
+# reason.
+#
+# We detect them by max_tokens. Real Sohn chats either don't set max_tokens
+# or set a generous budget (≥1024). Auxiliary calls cap at 50-500.
+AUXILIARY_MAX_TOKENS_THRESHOLD = int(
+    os.environ.get("ACTI_AUXILIARY_MAX_TOKENS_THRESHOLD", "800")
+)
+
+
+def _is_auxiliary_call(body: dict) -> bool:
+    """True if the request looks like an OWUI auxiliary call (title gen, tag
+    gen, follow-up suggestion, etc.) that should bypass Sohn injection,
+    tools, and cortex extraction."""
+    mt = body.get("max_tokens")
+    if isinstance(mt, int) and 0 < mt < AUXILIARY_MAX_TOKENS_THRESHOLD:
+        return True
+    return False
 
 
 # ---------- app lifespan ----------
@@ -206,6 +328,40 @@ async def chat_completions(request: Request):
 
     body["model"] = SERVED_NAME
     stream = bool(body.get("stream"))
+
+    # Auxiliary call (title gen, tag gen, follow-up suggestions) — bypass the
+    # Sohn pipeline entirely. These don't need persona, memories, tools, or
+    # extraction. Letting them through the full pipeline causes the model to
+    # over-deliberate against a small token budget and OWUI sees empty
+    # responses (the "infinite loop" UX).
+    if _is_auxiliary_call(body):
+        # Auxiliary calls have small token budgets and shouldn't think — they
+        # need short, mechanical responses (titles, tags, follow-up suggestions).
+        # With thinking on, the model spends the entire budget deliberating and
+        # never reaches content. Force thinking off here only — this targeted
+        # disable does NOT affect the user-facing chat path.
+        ctk = body.get("chat_template_kwargs") or {}
+        if "enable_thinking" not in ctk:
+            ctk["enable_thinking"] = False
+            body["chat_template_kwargs"] = ctk
+        _log(f"[gateway] auxiliary call (max_tokens={body.get('max_tokens')}) — pass-through, thinking off")
+        client: httpx.AsyncClient = request.app.state.client
+        if stream:
+            async def aux_stream():
+                try:
+                    async with client.stream("POST", "/v1/chat/completions", json=body) as resp:
+                        async for chunk in resp.aiter_bytes():
+                            yield chunk
+                except httpx.HTTPError as e:
+                    msg = str(e).replace('"', "'")
+                    yield (f'data: {{"error":{{"message":"{msg}","type":"upstream_error"}}}}\n\n').encode()
+            return StreamingResponse(aux_stream(), media_type="text/event-stream")
+        try:
+            resp = await client.post("/v1/chat/completions", json=body)
+        except httpx.HTTPError as e:
+            return _error(502, f"Upstream error: {e}", "upstream_error")
+        return JSONResponse(content=resp.json(), status_code=resp.status_code)
+
     skills.maybe_reload_skills(request.app.state)
     skill_lib: dict = request.app.state.skills
     client_passed_tools = bool(body.get("tools"))
@@ -281,31 +437,39 @@ async def chat_completions(request: Request):
         ))
 
     if use_proxy_tools:
-        proxy_tools: list[dict] = []
-        if use_skills:
-            proxy_tools.append(skills.LOAD_SKILL_TOOL)
-        if use_media:
-            if not suppress_image:
-                proxy_tools.append(media.GENERATE_IMAGE_TOOL)
-            if not suppress_video:
-                proxy_tools.append(media.GENERATE_VIDEO_TOOL)
-        if use_library:
-            proxy_tools.append(library.RECALL_CONTEXT_TOOL)
+        # Build the registry of tools that load_tool is allowed to activate.
+        # OWUI feature toggles can suppress generate_image / generate_video
+        # entirely (they get handled by OWUI native paths instead).
+        allowed_schemas = _real_tool_schemas()
+        if not use_skills:
+            allowed_schemas.pop("load_skill", None)
+        if not use_media or suppress_image:
+            allowed_schemas.pop("generate_image", None)
+        if not use_media or suppress_video:
+            allowed_schemas.pop("generate_video", None)
+        if not use_library:
+            allowed_schemas.pop("recall_context", None)
+
         if suppress_image or suppress_video:
             _log(f"[gateway] feature toggles active: "
                  f"image_gen={'OWUI' if suppress_image else 'agent'} "
                  f"video_gen={'OWUI' if suppress_video else 'agent'}")
-        body["tools"] = proxy_tools
+
+        # Only the bootstrap tool is exposed by default. Real schemas land
+        # in body["tools"] only after the model calls load_tool with the
+        # tool's name.
+        body["tools"] = [LOAD_TOOL_SCHEMA]
         body.setdefault("tool_choice", "auto")
 
         handlers = _build_tool_handlers(skill_lib)
-        # Drop matching handlers too, so a stale tool_call from an earlier
-        # turn (in a long conversation) can't accidentally re-invoke a
-        # suppressed tool either.
-        if suppress_image:
-            handlers.pop("generate_image", None)
-        if suppress_video:
-            handlers.pop("generate_video", None)
+        handlers["load_tool"] = _make_load_tool_handler(body, allowed_schemas)
+        # Drop matching handlers for suppressed tools too, so a stale
+        # tool_call from an earlier turn can't accidentally re-invoke a
+        # suppressed tool — and the model can't load_tool its way around
+        # the suppression either.
+        for tname in list(handlers):
+            if tname not in allowed_schemas and tname != "load_tool":
+                handlers.pop(tname, None)
         if stream:
             return StreamingResponse(
                 run_agent_stream(
