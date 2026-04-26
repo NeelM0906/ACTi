@@ -387,6 +387,32 @@ def _inject_system_prompt(messages: list, skills_manifest: str = "") -> list:
     return [{"role": "system", "content": base}] + messages
 
 
+# Style guard appended to OWUI's auxiliary-call system messages. Without it,
+# OWUI's default title prompt explicitly asks the model to "Generate a … title
+# with an emoji", which violates Sohn's no-emoji branding. The full Sohn prompt
+# isn't injected for auxiliary calls (too expensive for sub-800-token budgets),
+# so this one-liner is the cheapest way to keep titles / tags / follow-ups in
+# the same plain-text register as the chat itself.
+_AUXILIARY_STYLE_GUARD = (
+    "Output plain text only. No emojis, no decorative characters, no quotation "
+    "marks around the result. Match the user's language."
+)
+
+
+def _augment_auxiliary_messages(messages: list) -> list:
+    """Append the style guard to (or prepend a new) system message."""
+    if messages and messages[0].get("role") == "system":
+        sys_msg = messages[0]
+        existing = sys_msg.get("content", "") or ""
+        if isinstance(existing, list):
+            existing = "\n".join(
+                p.get("text", "") for p in existing if isinstance(p, dict)
+            )
+        merged = str(existing).rstrip() + "\n\n" + _AUXILIARY_STYLE_GUARD
+        return [{**sys_msg, "content": merged}] + messages[1:]
+    return [{"role": "system", "content": _AUXILIARY_STYLE_GUARD}] + messages
+
+
 def _error(status: int, message: str, etype: str = "server_error") -> JSONResponse:
     return JSONResponse(
         status_code=status,
@@ -422,7 +448,14 @@ async def chat_completions(request: Request):
         if "enable_thinking" not in ctk:
             ctk["enable_thinking"] = False
             body["chat_template_kwargs"] = ctk
-        _log(f"[gateway] auxiliary call (max_tokens={body.get('max_tokens')}) — pass-through, thinking off")
+        # Append the no-emoji style guard. OWUI's default title prompt
+        # asks for emojis explicitly; without this guard they leak into
+        # chat titles, tags, and follow-up suggestions in the sidebar.
+        body["messages"] = _augment_auxiliary_messages(body.get("messages", []))
+        # Auxiliary requests must not carry the OWUI user identifier —
+        # the engine doesn't need it and it's not part of the chat itself.
+        body.pop("user", None)
+        _log(f"[gateway] auxiliary call (max_tokens={body.get('max_tokens')}) — pass-through, thinking off, style-guarded")
         client: httpx.AsyncClient = request.app.state.client
         if stream:
             async def aux_stream():

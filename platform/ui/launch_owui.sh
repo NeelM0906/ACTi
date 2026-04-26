@@ -28,6 +28,28 @@ export DEFAULT_MODELS="Sohn"
 # to seed the user's signup-collected name so the model can address them by
 # name from their first turn. MUST stay on for memory isolation to work.
 export ENABLE_FORWARD_USER_INFO_HEADERS=true
+
+# Override OWUI's default chat-title prompt. The default ships with
+# "Generate a concise, 3-5 word title with an emoji ..." — Sohn's branding
+# is no-emoji, so we strip that clause. The proxy adds a defense-in-depth
+# style guard for ALL auxiliary calls, but overriding here at the source
+# keeps OWUI's instruction internally consistent.
+export TITLE_GENERATION_PROMPT_TEMPLATE='### Task:
+Generate a concise 3-5 word title summarizing the chat history.
+
+### Guidelines:
+- The title should clearly represent the main theme or subject of the conversation.
+- Use plain text only — NO emojis, NO quotation marks, NO special formatting.
+- Write the title in the chat'"'"'s primary language; default to English if multilingual.
+- Length must be between 3 and 5 words.
+
+### Output:
+JSON format: { "title": "your concise title here" }
+
+### Chat History:
+<chat_history>
+{{MESSAGES:END:6}}
+</chat_history>'
 # DEFAULT_USER_ROLE intentionally NOT set so the first signup becomes admin.
 # Future signups default to "pending" via the admin panel after first admin exists.
 # Admins see ALL resources regardless of access grants — without this, OWUI 0.9.2
