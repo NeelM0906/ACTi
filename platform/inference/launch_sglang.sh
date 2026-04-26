@@ -1,21 +1,22 @@
 #!/bin/bash
 # ACTi inference engine launcher (SGLang flavor).
 #
-# Default engine for the ACTi platform. Targets MoE base models with a small
-# active-parameter count (e.g. redacted-base-model from AMD's day-0 release on
-# Instinct MI3xx). RadixAttention transparently caches the shared 3.5k-token
-# Sohn system prompt across all users — large win on a multi-user deployment.
+# Default engine for the ACTi platform. Targets sparse MoE base models with a
+# small active-parameter count, run on AMD Instinct MI3xx via the ROCm torch
+# wheels. RadixAttention transparently caches the shared ~3.5k-token Sohn
+# system prompt across all users — large win on a multi-user deployment.
 #
-# Reads required model identity + parser config from environment (typically
-# sourced from /etc/acti/env or startup/.env at boot time). The model identity
-# is operator-confidential and is NOT checked into the public repository.
+# Reads required base-model identity + parser config from environment
+# (typically sourced from /etc/acti/env or startup/.env at boot time). The
+# base-model identity is operator-confidential and is NEVER checked into
+# the public repository, in code, comments, or example values.
 set -e
 set -o pipefail
 
 # --- Required from environment ---
-: "${ACTI_MODEL_ID:?ACTI_MODEL_ID must be set (HuggingFace repo id of the underlying base model)}"
-: "${ACTI_TOOL_CALL_PARSER:?ACTI_TOOL_CALL_PARSER must be set (SGLang tool-call parser name, e.g. the tool-call parser)}"
-: "${ACTI_REASONING_PARSER:?ACTI_REASONING_PARSER must be set (SGLang reasoning parser name, e.g. the reasoning parser)}"
+: "${ACTI_MODEL_ID:?ACTI_MODEL_ID must be set (HuggingFace repo id or local path of the underlying base model)}"
+: "${ACTI_TOOL_CALL_PARSER:?ACTI_TOOL_CALL_PARSER must be set (SGLang tool-call parser name appropriate for your base model)}"
+: "${ACTI_REASONING_PARSER:?ACTI_REASONING_PARSER must be set (SGLang reasoning parser name appropriate for your base model)}"
 
 # --- Optional, with sensible defaults ---
 ACTI_PYTHON_ENV="${ACTI_PYTHON_ENV:-acti-sglang}"

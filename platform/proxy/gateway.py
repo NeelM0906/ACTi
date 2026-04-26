@@ -98,8 +98,10 @@ _TOOL_LABELS: dict[str, ToolLabels] = {
 # schema into the chat-template's prompt for every request — auxiliary OWUI
 # calls (title gen, tag gen, follow-up suggestions) get them too, which:
 #   - bloats the prompt (~1500-3000 extra tokens per request)
-#   - triggers known engine issue (model enters "fast tool-call mode" when
-#     tools are present, which interacts unpredictably with thinking mode)
+#   - triggers a known reasoning-suppression behavior in the inference
+#     engine: presence of tool schemas pushes the model into a fast
+#     tool-call mode with reduced thinking, which interacts unpredictably
+#     with the chat-template's thinking block
 #   - makes small-budget auxiliary calls deliberate themselves into a
 #     content=null / finish_reason=length state
 #

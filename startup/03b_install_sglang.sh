@@ -27,7 +27,7 @@ conda create -n "$ENV_DST" --clone "$ENV_SRC" -y
 ENV_PY="/opt/conda/envs/$ENV_DST/bin/python"
 PIP="$ENV_PY -m pip --disable-pip-version-check"
 
-# 2. Pull the SGLang source matching AMD's day-0 recommendation.
+# 2. Pull the SGLang source at the version pinned in startup/.env.
 sudo rm -rf "$SRC_ROOT"
 sudo mkdir -p "$(dirname "$SRC_ROOT")"
 sudo git clone --depth 1 -b "$SGL_VERSION" https://github.com/sgl-project/sglang.git "$SRC_ROOT"

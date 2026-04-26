@@ -74,13 +74,13 @@ from cortex_prompts import (
 # ---------- configuration ----------
 
 # Approximate tokens per character. English averages ~3.5 chars/token for
-# BPE-style BPE tokenizers. Off by maybe 10% in either direction; that's
-# fine since the compact threshold has a generous buffer.
+# the BPE tokenizers we serve. Off by maybe 10% in either direction;
+# that's fine since the compact threshold has a generous buffer.
 CHARS_PER_TOKEN = 3.5
 
 # Default safety buffer between estimated tokens and engine context cap.
 # Must be > one full assistant reply + tool call. Claude Code uses 13_000;
-# we use 16_000 for headroom on the engine's 256k window.
+# we use 16_000 for headroom on the engine's long-context window.
 DEFAULT_BUFFER_TOKENS = 16_000
 
 # Number of recent turns kept verbatim post-compaction. A "turn" here is

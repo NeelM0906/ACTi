@@ -57,8 +57,8 @@ These four must be set in `startup/.env` before `00_bootstrap.sh` will run:
 | Variable | Description |
 |---|---|
 | `ACTI_MODEL_ID` | HuggingFace repo id of the underlying base model. **Operator-confidential** — request from the platform team. |
-| `ACTI_TOOL_CALL_PARSER` | Tool-call parser name appropriate for your base model. The same name format is used by both engines (e.g. `the tool-call parser`). |
-| `ACTI_REASONING_PARSER` | Reasoning parser name that separates chain-of-thought (e.g. `the reasoning parser`). |
+| `ACTI_TOOL_CALL_PARSER` | Tool-call parser name appropriate for your base model. Operator-confidential — request from the platform team. |
+| `ACTI_REASONING_PARSER` | Reasoning parser name that separates chain-of-thought from final content for your base model. Operator-confidential — request from the platform team. |
 | `HF_TOKEN` | HuggingFace access token for weight download |
 
 `ACTI_INFERENCE_ENGINE` (default `sglang`) selects which engine `07_start_all.sh` launches. Use `vllm` to run the dense-model fallback instead.

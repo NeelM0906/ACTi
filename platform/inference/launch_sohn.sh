@@ -25,9 +25,9 @@ ACTI_INFERENCE_PORT="${ACTI_INFERENCE_PORT:-8000}"
 
 # --- Throughput tuning ---
 # MTP (Multi-Token Prediction) speculative decoding. Requires the model
-# checkpoint to ship MTP weights (e.g. AMD's day-0 release for compatible
-# architectures). Set ACTI_SPECULATIVE_CONFIG to '' (empty) to disable.
-# 1.5–2× single-stream decode throughput when the draft is accepted.
+# checkpoint to ship MTP weights. Set ACTI_SPECULATIVE_CONFIG to ''
+# (empty) to disable. 1.5–2× single-stream decode throughput when the
+# draft is accepted.
 ACTI_SPECULATIVE_CONFIG="${ACTI_SPECULATIVE_CONFIG-{\"method\":\"mtp\",\"num_speculative_tokens\":2}}"
 
 # Sampler defaults merged on top of the model's generation_config.json.
