@@ -153,6 +153,10 @@ These paths are operator-configurable via environment variables. See [`startup/e
 | 8000 | `0.0.0.0` | vLLM (internal use only — should not be in any firewall allowlist beyond localhost) |
 | 3000 | `127.0.0.1` | acti-ui (internal) |
 
+## Behavioral evaluation
+
+A self-contained eval framework lives at [`platform/eval/`](../platform/eval/). It calls `/raw/v1` (no persona injection — does not write to cortex memory or trigger skill-sync) and writes only to `/opt/acti/eval/{cache,runs}`. Used as a checkpoint gate before any change to `sohn.txt`, the proxy's tool wiring, or the retrieval service. See [`EVAL.md`](EVAL.md) for the rubric, the iteration history with metrics, cross-validation results, and the bug-fix write-ups.
+
 ## Failure modes & recovery
 
 | Symptom | Likely cause | Recovery |

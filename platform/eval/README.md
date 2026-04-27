@@ -4,6 +4,11 @@ A measurable rubric + canonical scenarios + LLM-as-judge service for grading
 Sohn's behavior. Standalone checkpoint — develops, validates, and benchmarks
 without touching production code paths.
 
+> This file is the operator-facing quickstart. For the rubric distillation,
+> the iteration history with metrics, the Sohn-vs-Opus cross-validation,
+> the `max_turns` sweep, and the parser-leak fix write-up, see
+> [`docs/EVAL.md`](../../docs/EVAL.md).
+
 ## Layout
 
 ```

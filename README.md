@@ -19,7 +19,9 @@ ACTi/
 ├── README.md                 # This file
 ├── docs/
 │   ├── API-REFERENCE.md      # Developer reference for the OpenAI-compatible API
-│   └── ARCHITECTURE.md       # How the components fit together
+│   ├── ARCHITECTURE.md       # How the components fit together
+│   ├── BACKEND_ARCHITECTURE.md  # Per-process operator's mental model
+│   └── EVAL.md               # Behavioral eval framework — rubric, scenarios, baseline, fix history
 ├── platform/                 # Runtime code and config
 │   ├── proxy/                # Identity-injecting OpenAI-compatible API gateway
 │   ├── system_prompts/       # Sohn's system prompt
@@ -27,6 +29,7 @@ ACTi/
 │   ├── status/               # Status page (HTML) + uptime collector
 │   ├── nginx/                # Reverse-proxy config (single-port public surface)
 │   ├── inference/            # Inference engine launch script
+│   ├── eval/                 # Behavioral eval framework (rubric, scenarios, runner, judge)
 │   └── tests/                # End-to-end SDK + agent simulation tests
 ├── vendor/
 │   └── acti-ui/              # Submodule → NeelM0906/acti-ui, a soft fork of
@@ -120,6 +123,12 @@ The full system prompt lives in [`platform/system_prompts/sohn.txt`](platform/sy
 ```
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full picture.
+
+## Behavioral evaluation
+
+Sohn's behavior is measured against a versioned 14-dimension rubric distilled from `sohn.txt`, run across 45 canonical scenarios that span the six `recall_context` intents and an adversarial bucket. Sohn-as-judge by default, cross-validated against Claude Opus 4.7. Three production fixes have shipped via this framework so far — citation hard-rule, `MAX_AGENT_TURNS` 4→6, and a tool-call parser-leak sanitizer.
+
+Current baseline: **96.0 / 100** (status YELLOW, all CRITICAL gates green). See [`docs/EVAL.md`](docs/EVAL.md) for the rubric, iteration history with metrics, the cross-validation results, the `max_turns` sweep, and the parser-bug write-up.
 
 ## License
 
