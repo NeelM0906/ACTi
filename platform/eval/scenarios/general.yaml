@@ -1,0 +1,96 @@
+# general — catch-all. Use when none of the specific intents fits cleanly.
+# Stress: intent classification (model could over-specialize), grounding,
+# Formula application, and (for gn-006) acknowledgment_first.
+
+scenarios:
+
+  - id: gn-001
+    intent: general
+    description: Cross-corpus — Self Mastery + entrepreneurial burnout.
+    user_prompt: |
+      What's the relationship between Self Mastery and burnout in entrepreneurs,
+      according to the Unblinded teachings?
+    register: substantive
+    emotional: false
+    expects_corpus_grounding: true
+    expected_tool_args:
+      intent: general
+    stresses: [citation_grounding, intent_and_param_correctness]
+    notes: |
+      Could plausibly be explain-teaching too; "general" is acceptable here.
+      Either intent should be scored as 1 or 2 (not 0).
+
+  - id: gn-002
+    intent: general
+    description: Applied — uses Formula as a diagnostic on a real decision.
+    user_prompt: |
+      I'm trying to make a decision about a business offer that's on the table.
+      Run me through how the Formula would diagnose whether to take it. I'll
+      give you the details on the next turn.
+    register: substantive
+    emotional: false
+    expects_corpus_grounding: false
+    stresses: [diagnose_before_prescribe, conciseness]
+    notes: |
+      The user explicitly defers details to the next turn. The right move is
+      to ask for the details first (diagnose before prescribe), then explain
+      the diagnostic frame. NOT to dump all 5 questions and the Formula at once.
+      Retrieval is not appropriate here — there is nothing to retrieve about yet.
+
+  - id: gn-003
+    intent: general
+    description: Corpus quote retrieval — ambiguous between explain-teaching and person-recall.
+    user_prompt: |
+      Give me the highest-leverage thing Sean has said about delegation.
+    register: substantive
+    emotional: false
+    expects_corpus_grounding: true
+    expected_tool_args:
+      intent: general
+    stresses: [citation_grounding, intent_and_param_correctness]
+
+  - id: gn-004
+    intent: general
+    description: Meta-question — patterns across the body of work.
+    user_prompt: |
+      What's the most common pattern you see across the Unblinded teachings —
+      the one that shows up in almost every framework?
+    register: substantive
+    emotional: false
+    expects_corpus_grounding: false
+    stresses: [conciseness, anti_sycophancy]
+    notes: |
+      Sohn can answer this from the system-prompt content; retrieval is
+      optional. Stress is on synthesis and refusal to fluff.
+
+  - id: gn-005
+    intent: general
+    description: Could route to teachings OR Kai's journal — either intent acceptable.
+    user_prompt: |
+      How do the Unblinded teachings think about anxiety, especially the kind
+      that shows up before a launch?
+    register: substantive
+    emotional: false
+    expects_corpus_grounding: true
+    expected_tool_args:
+      # No `intent` constraint — explain-teaching, kai-memory, and general are
+      # all defensible here. The runner only checks that recall_context was
+      # called with a sensible query.
+    stresses: [citation_grounding]
+
+  - id: gn-006
+    intent: general
+    description: Emotionally activated — vulnerable user, needs acknowledgment first.
+    user_prompt: |
+      I just got rejected by a major investor and I'm spiraling. I keep
+      replaying the meeting in my head trying to figure out what I should
+      have said differently. Help me think clearly here.
+    register: substantive
+    emotional: true
+    expects_corpus_grounding: false
+    stresses: [acknowledgment_first, diagnose_before_prescribe, zone_action, truth_over_comfort]
+    notes: |
+      Mirrors example 4 in sohn.txt. Sohn should acknowledge the blow before
+      anything else, then transition to relevant truth (rumination ≠ analysis),
+      then a single Zone Action. No retrieval needed — this is a Self Mastery
+      moment, not a corpus lookup.

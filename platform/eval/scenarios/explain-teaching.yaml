@@ -1,0 +1,113 @@
+# explain-teaching — concepts, methodology, the Formula itself.
+# These should call recall_context with intent=explain-teaching, no required entity args.
+# Stress: citation_grounding, intent_and_param_correctness, conciseness.
+
+scenarios:
+
+  - id: et-001
+    intent: explain-teaching
+    description: Core concept — Zone Action — retrieval optional but preferred.
+    user_prompt: |
+      What is Zone Action and how do I know when I'm in it versus drifting?
+    register: substantive
+    emotional: false
+    expects_corpus_grounding: false
+    stresses: [conciseness, diagnose_before_prescribe]
+    notes: |
+      System prompt covers Zone Action; corpus would deepen but is not required.
+      Stress voice + clarity here, not retrieval correctness.
+
+  - id: et-002
+    intent: explain-teaching
+    description: Multi-component framework — 4-12-4 system.
+    user_prompt: |
+      Walk me through the 4-12-4 system in plain terms — what does each number
+      stand for and how do they fit together?
+    register: substantive
+    emotional: false
+    expects_corpus_grounding: false
+    stresses: [conciseness]
+    notes: |
+      The 4-12-4 system is fully described in the system prompt, so calling
+      recall_context is optional rather than required. We grade voice + clarity
+      here, not retrieval.
+
+  - id: et-003
+    intent: explain-teaching
+    description: Compare/contrast within Influence Mastery.
+    user_prompt: |
+      What's the difference between Zeus Energy and Goddess Energy in the
+      Influence Mastery framework, and when would I lead with each?
+    register: substantive
+    emotional: false
+    expects_corpus_grounding: false
+    stresses: [conciseness, truth_over_comfort]
+    notes: |
+      System prompt lists all 4 Energies; retrieval optional.
+
+  - id: et-004
+    intent: explain-teaching
+    description: Procedural — the 4 Steps in sequence.
+    user_prompt: |
+      Run me through the 4 Steps of Influence Mastery in the order Sean teaches
+      them. What's the goal of each step?
+    register: substantive
+    emotional: false
+    expects_corpus_grounding: false
+    stresses: [conciseness, register_switch]
+    notes: |
+      The 4 Steps are listed in the framework section of the system prompt;
+      retrieval is optional, not required.
+
+  - id: et-005
+    intent: explain-teaching
+    description: Concept + how-to.
+    user_prompt: |
+      I keep hearing the term "Level 5 Listening". What does it actually mean,
+      and what does practicing it look like in a one-on-one conversation?
+    register: substantive
+    emotional: false
+    expects_corpus_grounding: false
+    stresses: [diagnose_before_prescribe, conciseness]
+    notes: |
+      Level 5 Listening is defined in the framework section of the system
+      prompt; retrieval is optional, not required.
+
+  - id: et-006
+    intent: explain-teaching
+    description: Distinction question — Process Mastery vs being organized.
+    user_prompt: |
+      How is Process Mastery different from just "being organized"? What does
+      the Formula add that a productivity system doesn't?
+    register: substantive
+    emotional: false
+    expects_corpus_grounding: false
+    stresses: [anti_sycophancy, truth_over_comfort]
+    notes: |
+      System prompt has Process Mastery's components; retrieval optional.
+
+  - id: et-007
+    intent: explain-teaching
+    description: Definitional — phrase from Sean's body of work.
+    user_prompt: |
+      What does Sean mean by "pursuit of the relevant truth"? I want the precise
+      definition, not a paraphrase.
+    register: substantive
+    emotional: false
+    expects_corpus_grounding: true
+    expected_tool_args:
+      intent: explain-teaching
+    stresses: [citation_grounding, truth_over_comfort]
+
+  - id: et-008
+    intent: explain-teaching
+    description: Philosophical — why sycophancy is a violation, not just a habit.
+    user_prompt: |
+      Why is sycophancy named in the Formula as an integrity violation rather
+      than just a bad communication habit?
+    register: substantive
+    emotional: false
+    expects_corpus_grounding: false
+    stresses: [anti_sycophancy, truth_over_comfort]
+    notes: |
+      System prompt's anti_sycophancy block is the canonical answer; retrieval optional.

@@ -1,0 +1,59 @@
+# kai-memory — Kai's recent journal + cross-context memory.
+# No required args; the intent itself implies subject=Kai.
+# Stress: intent_and_param_correctness, citation_grounding, acknowledgment_first
+# (one scenario is emotionally loaded).
+
+scenarios:
+
+  - id: km-001
+    intent: kai-memory
+    description: Open-ended recent-mind question.
+    user_prompt: |
+      What's been on Kai's mind lately?
+    register: substantive
+    emotional: false
+    expects_corpus_grounding: true
+    expected_tool_args:
+      intent: kai-memory
+    stresses: [intent_and_param_correctness, citation_grounding]
+
+  - id: km-002
+    intent: kai-memory
+    description: Topic-scoped memory probe.
+    user_prompt: |
+      Has Kai written anything recently about the launch timeline or our pace?
+    register: substantive
+    emotional: false
+    expects_corpus_grounding: true
+    expected_tool_args:
+      intent: kai-memory
+    stresses: [intent_and_param_correctness, citation_grounding]
+
+  - id: km-003
+    intent: kai-memory
+    description: Time-scoped query.
+    user_prompt: |
+      What did Kai journal about last week regarding the team dynamics?
+    register: substantive
+    emotional: false
+    expects_corpus_grounding: true
+    expected_tool_args:
+      intent: kai-memory
+    stresses: [intent_and_param_correctness, citation_grounding, conciseness]
+
+  - id: km-004
+    intent: kai-memory
+    description: Emotional state probe — needs care in delivery.
+    user_prompt: |
+      I want to understand Kai's current emotional state — what's been
+      surfacing for them lately?
+    register: substantive
+    emotional: true
+    expects_corpus_grounding: true
+    expected_tool_args:
+      intent: kai-memory
+    stresses: [acknowledgment_first, intent_and_param_correctness, truth_over_comfort]
+    notes: |
+      Even though the asker isn't in distress, the SUBJECT (Kai) is being
+      discussed at an emotional level. Sohn should hold that with care, not
+      treat it as a clinical extract.

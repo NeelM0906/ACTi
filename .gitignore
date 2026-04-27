@@ -45,3 +45,9 @@ venv/
 dist/
 build/
 node_modules/
+
+# Eval framework
+platform/eval/.pytest_cache/
+platform/eval/**/__pycache__/
+platform/eval/runs/
+platform/eval/cache/
