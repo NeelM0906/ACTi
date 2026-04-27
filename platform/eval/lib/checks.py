@@ -201,7 +201,11 @@ def _check_citation_grounding(rubric_dim: dict, scenario: dict, text: str) -> Ch
     if not scenario.get("_recall_called"):
         return CheckResult(score=None, evidence=[])
 
-    placeholders = {"", "?", "(unknown source)", "(unknown)", "unknown", "none"}
+    placeholders = {
+        "", "?", "(unknown source)", "(unknown)", "unknown", "none",
+        # Corpus-specific placeholders surfaced by the eval baseline.
+        "ublib2 legacy (provenance lost)", "ublib2 legacy",
+    }
     usable_titles: list[str] = []
     for tc in scenario.get("_tool_calls") or []:
         if (tc.get("function") or {}).get("name") != "recall_context":

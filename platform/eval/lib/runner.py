@@ -50,7 +50,7 @@ DEFAULT_RUNS_DIR = Path(os.environ.get(
 DEFAULT_SYSTEM_PROMPT_PATH = Path(os.environ.get(
     "ACTI_SYSTEM_PROMPT_PATH", "/opt/acti/system_prompts/sohn.txt"
 ))
-DEFAULT_MAX_TURNS = 4
+DEFAULT_MAX_TURNS = 6
 DEFAULT_PER_SCENARIO_TIMEOUT_S = 90.0
 
 
@@ -116,6 +116,7 @@ class ScenarioRun:
     tool_calls: list[dict]              # each: {function: {name}, args: {...}, hits: [...]}
     retrieved_hits: list[dict]          # flattened across all recall_context calls
     latency_s: float
+    max_turns_used: int = 0             # actual turns the loop ran for
     sut_error: Optional[str] = None
 
 
@@ -254,10 +255,12 @@ async def _drive_one_scenario(
     flattened_hits: list[dict] = []
     final_text = ""
     err: Optional[str] = None
+    turns_used = 0
     t0 = time.time()
     deadline = t0 + timeout_s
 
     for turn in range(max_turns):
+        turns_used = turn + 1
         if time.time() > deadline:
             err = f"timeout after {timeout_s}s"
             break
@@ -341,6 +344,7 @@ async def _drive_one_scenario(
         tool_calls=captured_calls,
         retrieved_hits=flattened_hits,
         latency_s=time.time() - t0,
+        max_turns_used=turns_used,
         sut_error=err,
     )
 
@@ -461,6 +465,10 @@ async def run_benchmark(
         async def _one(s: dict) -> ScenarioReport:
             async with sem:
                 t0 = time.time()
+                # Per-scenario max_turns override — falls back to the run-level value.
+                # Lets us cap simple scenarios (greetings, identity probes) at 1 and
+                # give complex synthesis scenarios more room.
+                scenario_max_turns = int(s.get("max_turns", max_turns))
                 run = await _drive_one_scenario(
                     scenario=s, system_prompt=system_prompt,
                     sut_client=sut_client, sut_base_url=sut_base_url,
@@ -468,7 +476,7 @@ async def run_benchmark(
                     retrieval_client=retrieval_client,
                     retrieval_base_url=retrieval_base_url,
                     retrieval_api_key=retrieval_api_key,
-                    max_turns=max_turns, timeout_s=per_scenario_timeout_s,
+                    max_turns=scenario_max_turns, timeout_s=per_scenario_timeout_s,
                 )
                 # Enrich the scenario dict with runtime flags for the checks.
                 s_runtime = dict(s)
@@ -547,6 +555,7 @@ def _persist(report: RunReport, runs_dir: Path) -> None:
                 "failed_critical": r.failed_critical,
                 "sut_error": r.run.sut_error,
                 "latency_s": round(r.run.latency_s, 2),
+                "max_turns_used": r.run.max_turns_used,
                 "response_text": r.run.response_text,
                 "tool_calls": r.run.tool_calls,
                 "n_hits": len(r.run.retrieved_hits),

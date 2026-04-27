@@ -54,6 +54,9 @@ def main() -> int:
     p.add_argument("--runs-dir", default=str(_runner.DEFAULT_RUNS_DIR))
     p.add_argument("--judge-cache-dir", default=str(_judge.DEFAULT_CACHE_DIR))
     p.add_argument("--concurrency", type=int, default=4)
+    p.add_argument("--max-turns", type=int, default=_runner.DEFAULT_MAX_TURNS,
+                   help="Max agent loop turns per scenario (default 4 = production). "
+                        "Per-scenario override available via the YAML 'max_turns' field.")
     p.add_argument("--no-judge", action="store_true",
                    help="Skip the LLM-as-judge pass; programmatic checks only.")
     p.add_argument("--no-cache", action="store_true",
@@ -100,7 +103,7 @@ def main() -> int:
         retrieval_base_url=args.retrieval_base_url,
         judge_base_url=args.judge_base_url,
         runs_dir=runs_dir, judge_cache_dir=judge_cache_dir,
-        concurrency=args.concurrency,
+        concurrency=args.concurrency, max_turns=args.max_turns,
         use_judge=not args.no_judge, use_judge_cache=not args.no_cache,
     ))
 

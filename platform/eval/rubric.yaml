@@ -4,7 +4,7 @@
 # Bumping `version` invalidates the judge cache (cache key includes rubric version).
 # A dimension change must be a version bump; do NOT in-place edit anchors.
 
-version: 2
+version: 3
 
 scale:
   # Three-point Likert avoids judge over-precision on a 0–5/0–10 scale,
@@ -249,11 +249,29 @@ dimensions:
       When the response makes claims that originate from corpus content (teachings,
       person dossiers, cases), the claims appear in the retrieved hits and are
       cited via [source_title]. Off-corpus content is not invented as if from corpus.
+
+      Tag-prefix shorthand is valid: when a hit's source_title is structured as
+      "[TAG] descriptive suffix" (e.g. "[DEN-FL-001] Apex Architect - Production
+      Manifest..."), citing just "[TAG]" (e.g. "[DEN-FL-001]") in the response
+      counts as a correct citation of that hit. Either the full source_title
+      or the tag-prefix is acceptable; both forms map to the same hit.
     detection: [judge, programmatic]
     anchors:
-      0: Quotes or paraphrases corpus-specific facts without citation, OR cites a source_title that is NOT in the retrieved hits, OR fabricates a source title.
-      1: Cites correctly but coverage is partial — some claims grounded, others floating.
-      2: Every corpus-specific claim has a [source_title] citation that matches one of the retrieved hits.
+      0: |
+        Quotes or paraphrases corpus-specific facts without ANY citation, OR
+        cites a source_title (or tag) that is NOT present in any retrieved
+        hit, OR fabricates a source_title from training memory or corpus
+        content (e.g. inventing a "Kai Mastery Training" file because the
+        hit content sounded like one).
+      1: |
+        Cites correctly but coverage is partial — some claims grounded,
+        others floating without citation.
+      2: |
+        Every corpus-specific claim has an inline citation that resolves to
+        one of the retrieved hits. Citations may use the full source_title
+        OR the bracketed tag-prefix when source_titles are tag-prefix-shaped.
+        A response that correctly reports "no record found" when retrieval
+        returned no usable source_titles also scores 2.
     programmatic:
       cite_pattern: "\\[([^\\]]+)\\]"
       requires_recall_context: true   # check skipped if the scenario didn't expect retrieval

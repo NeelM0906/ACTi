@@ -54,7 +54,7 @@ SYSTEM_PROMPT = Path(
 ENGINE_URL = "http://127.0.0.1:8000"
 SERVED_NAME = "Sohn"
 API_KEYS_FILE = Path(os.environ.get("ACTI_API_KEY_FILE", "/var/lib/acti/api-keys.txt"))
-MAX_AGENT_TURNS = int(os.environ.get("ACTI_MAX_SKILL_LOADS", "4"))
+MAX_AGENT_TURNS = int(os.environ.get("ACTI_MAX_SKILL_LOADS", "6"))
 AGENT_KEEPALIVE_INTERVAL_S = float(os.environ.get("ACTI_AGENT_KEEPALIVE_INTERVAL_S", "15"))
 
 # ---------- Cortex (memory) configuration ----------
