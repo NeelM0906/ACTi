@@ -109,7 +109,7 @@ def _sanitize_tool_call_args(arguments_json: str) -> str:
     """Strip stray XML angle brackets from string values inside a tool_call's
     JSON arguments.
 
-    Engine-side parsers (notably the tool-call parser) extract a parameter value as
+    Engine-side XML-tag-based tool-call parsers extract a parameter value as
     everything between `<parameter=name>` and `</parameter>`. When the model
     auto-regressively emits a stray `>` or `<` before the closing tag — which
     happens at non-zero temperature on long-form outputs — that character
@@ -649,7 +649,7 @@ async def run_agent_sync(
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message", {}) or {}
         tool_calls = msg.get("tool_calls") or []
-        # Sanitize parser-leak chars (e.g. trailing '>' on XML-tag-based).
+        # Sanitize parser-leak chars (e.g. trailing '>' from XML-tag parsers).
         for tc in tool_calls:
             fn = tc.get("function") or {}
             args_raw = fn.get("arguments", "")

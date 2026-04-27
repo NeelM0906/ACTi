@@ -1,6 +1,6 @@
 """Tests for spark._sanitize_tool_call_args.
 
-Covers the XML-tag-based parser-leak case where the engine's tool-call parser
+Covers the parser-leak case where the engine's XML-tag-based tool-call parser
 extracts a parameter value as everything between `<parameter=name>` and
 `</parameter>`, and a stray `>` emitted by the model leaks into the value.
 

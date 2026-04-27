@@ -222,7 +222,7 @@ The clean fix is corpus-side: backfill `source_title` for the Kai journal chunks
 
 ### The bug
 
-The engine is SGLang with `--tool-call-parser the tool-call parser`. That parser extracts a parameter value as everything between `<parameter=name>` and `</parameter>`. When the model auto-regressively emits a stray `>` before the closing tag — rare, surfaces at non-zero temperature on long outputs — the character leaks into the value:
+The engine is SGLang with an XML-tag-based tool-call parser (the specific parser is configured via `ACTI_TOOL_CALL_PARSER` and is operator-confidential). That parser extracts a parameter value as everything between `<parameter=name>` and `</parameter>`. When the model auto-regressively emits a stray `>` before the closing tag — rare, surfaces at non-zero temperature on long outputs — the character leaks into the value:
 
 ```json
 {"intent": "continuity-snapshot>", "subject_entity": "Kai"}
@@ -255,7 +255,7 @@ The bug is rare. The original eval reproduction is the only confirmed instance i
 
 ### Why proxy-side and not engine-side
 
-Patching SGLang's the tool-call parser parser upstream is the right long-term fix. A proxy-side sanitizer is the right short-term fix because:
+Patching the upstream tool-call parser is the right long-term fix. A proxy-side sanitizer is the right short-term fix because:
 
 1. **Lowest blast radius**: one file (`spark.py`), no engine restart, no upstream version pinning.
 2. **Format-agnostic**: covers any future tool-call parser that emits the same shape of leak.
@@ -394,7 +394,7 @@ python bin/run_benchmark.py --coverage
 2. **Judge for `conciseness` and `zone_action`**. Cross-validation showed Sohn-as-judge is +1 lenient on these two dims in 5 of 16 cases vs Opus 4.7. Consider per-dim judge selection if pushing to 99/100.
 3. **Programmatic strictness on `subject_entity` pattern** (currently insists on `user:adam-gugino` shape). The retrieval service does fuzzy resolution and accepts bare names. Worth relaxing those patterns in scenarios.
 4. **Scenarios for the `products` and `user` namespaces** to close the coverage blind spots. Needs reconciliation of the naming mismatch first (service exposes `users` plural while the proxy's tool description lists `user` singular).
-5. **Upstream the the tool-call parser parser fix** to SGLang once the proxy-side sanitizer has accumulated enough wild-data evidence for a clean repro test case.
+5. **Upstream the tool-call parser fix** once the proxy-side sanitizer has accumulated enough wild-data evidence for a clean repro test case.
 6. **Judge cache pruning**. After freezing the rubric and running for a while, the cache grows with golden judgements that should never be invalidated. No pruning policy yet.
 
 ---
