@@ -103,6 +103,72 @@ def _default_log(line: str) -> None:
 
 # ---------- content scrubber ----------
 
+# ---------- tool-call argument sanitizer ----------
+
+def _sanitize_tool_call_args(arguments_json: str) -> str:
+    """Strip stray XML angle brackets from string values inside a tool_call's
+    JSON arguments.
+
+    Engine-side parsers (notably the tool-call parser) extract a parameter value as
+    everything between `<parameter=name>` and `</parameter>`. When the model
+    auto-regressively emits a stray `>` or `<` before the closing tag — which
+    happens at non-zero temperature on long-form outputs — that character
+    leaks into the value. Common shape:
+
+        {"intent": "continuity-snapshot>", "subject_entity": "Kai"}
+
+    The trailing `>` then either trips downstream enum validation
+    (retrieval_context rejects "continuity-snapshot>" as an unknown intent)
+    or silently corrupts routing.
+
+    No legitimate string argument we expose ends in a bare `<` or `>`, so
+    stripping a trailing one of those (with surrounding whitespace) is safe
+    and idempotent. Numbers, bools, nulls, and arrays/objects pass through
+    unchanged.
+
+    On JSON parse failure, return the input as-is — the caller will hit the
+    same parse failure later and surface it.
+    """
+    if not arguments_json:
+        return arguments_json
+    try:
+        parsed = json.loads(arguments_json)
+    except (json.JSONDecodeError, ValueError):
+        return arguments_json
+    if not isinstance(parsed, dict):
+        return arguments_json
+    changed = False
+    for k, v in list(parsed.items()):
+        if not isinstance(v, str):
+            continue
+        cleaned = _strip_unbalanced_trailing_brackets(v)
+        if cleaned != v:
+            parsed[k] = cleaned
+            changed = True
+    if not changed:
+        return arguments_json
+    return json.dumps(parsed, ensure_ascii=False)
+
+
+def _strip_unbalanced_trailing_brackets(s: str) -> str:
+    """Strip a trailing run of `>` / `<` (and the whitespace around them)
+    only when the brackets in the resulting string would be balanced.
+
+    Preserves legitimate content like "what is <Zone Action>" (balanced)
+    while removing parser-leak garbage like "continuity-snapshot>" (unbalanced).
+    """
+    rstripped = s.rstrip()
+    # Walk the trailing run of bracket-like chars, checking balance after each.
+    while rstripped and rstripped[-1] in "<>":
+        candidate = rstripped[:-1].rstrip()
+        if candidate.count("<") == candidate.count(">"):
+            rstripped = candidate
+            continue
+        # Stripping more would leave brackets unbalanced — stop.
+        break
+    return rstripped if rstripped != s.rstrip() else s
+
+
 class _ToolCallStripper:
     """Strip <tool_call>…</tool_call> blocks from streamed content.
 
@@ -372,7 +438,16 @@ async def _stream_one_turn(
         return []
 
     if finish_reason == "tool_calls" and tool_calls:
-        return [tool_calls[i] for i in sorted(tool_calls.keys())]
+        out: list[dict] = []
+        for i in sorted(tool_calls.keys()):
+            tc = tool_calls[i]
+            fn = tc.get("function") or {}
+            args_raw = fn.get("arguments", "")
+            args_clean = _sanitize_tool_call_args(args_raw)
+            if args_clean != args_raw:
+                fn["arguments"] = args_clean
+            out.append(tc)
+        return out
     return []
 
 
@@ -574,6 +649,13 @@ async def run_agent_sync(
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message", {}) or {}
         tool_calls = msg.get("tool_calls") or []
+        # Sanitize parser-leak chars (e.g. trailing '>' on XML-tag-based).
+        for tc in tool_calls:
+            fn = tc.get("function") or {}
+            args_raw = fn.get("arguments", "")
+            args_clean = _sanitize_tool_call_args(args_raw)
+            if args_clean != args_raw:
+                fn["arguments"] = args_clean
         proxy_calls = [
             t for t in tool_calls
             if (t.get("function") or {}).get("name") in tool_handlers
