@@ -51,3 +51,6 @@ platform/eval/.pytest_cache/
 platform/eval/**/__pycache__/
 platform/eval/runs/
 platform/eval/cache/
+
+# Ruff cache
+.ruff_cache/

@@ -30,6 +30,7 @@ ACTi/
 │   ├── nginx/                # Reverse-proxy config (single-port public surface)
 │   ├── inference/            # Inference engine launch script
 │   ├── eval/                 # Behavioral eval framework (rubric, scenarios, runner, judge)
+│   ├── translator/           # PDF → Unblinded-Formula structured CSV (RAG over Pinecone + Sohn)
 │   └── tests/                # End-to-end SDK + agent simulation tests
 ├── vendor/
 │   └── acti-ui/              # Submodule → NeelM0906/acti-ui, a soft fork of
